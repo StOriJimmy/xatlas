@@ -9,15 +9,18 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
+#include <atomic>
 #include <cstddef>
-#include <mutex>
+#include <cmath>
 #include <thread>
+#include <unordered_map>
 #include <bx/filepath.h>
 #include <bx/string.h>
 #include <cgltf.h>
 #include <GLFW/glfw3.h>
 #include <imgui/imgui.h>
 #include <nativefiledialog/nfd.h>
+#include <ofbx.h>
 #include <stb_image.h>
 #include <stb_image_resize.h>
 #define STL_READER_NO_EXCEPTIONS
@@ -27,36 +30,14 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 #define ONE_GLTF_OBJECT_PER_MESH 0
 
-bgfx::VertexDecl ModelVertex::decl;
+bgfx::VertexLayout ModelVertex::layout;
 
-struct ModelStatus
+enum class ModelStatus
 {
-	enum Enum
-	{
-		NotLoaded,
-		Loading,
-		Finalizing,
-		Loaded
-	};
-
-	Enum get()
-	{
-		m_lock.lock();
-		Enum result = m_value;
-		m_lock.unlock();
-		return result;
-	}
-
-	void set(Enum value)
-	{
-		m_lock.lock();
-		m_value = value;
-		m_lock.unlock();
-	}
-
-private:
-	std::mutex m_lock;
-	Enum m_value = NotLoaded;
+	NotLoaded,
+	Loading,
+	Finalizing,
+	Loaded
 };
 
 enum class ModelFormat
@@ -68,7 +49,7 @@ enum class ModelFormat
 
 struct
 {
-	ModelStatus status;
+	std::atomic<ModelStatus> status;
 	std::thread *thread = nullptr;
 	objzModel *data = nullptr;
 	void (*destroyModelData)(objzModel *) = nullptr;
@@ -81,6 +62,8 @@ struct
 	bgfx::VertexBufferHandle wireframeVb = BGFX_INVALID_HANDLE;
 	std::vector<WireframeVertex> wireframeVertices;
 	float scale = 1.0f;
+	bool rightHandedAxis = false; // Default is z/-x/y, right handed is -z/x/y.
+	bool clockwiseFaceWinding = true;
 	bgfx::ShaderHandle vs_model;
 	bgfx::ShaderHandle fs_material;
 	bgfx::ProgramHandle materialProgram;
@@ -95,6 +78,39 @@ struct
 	bgfx::TextureHandle u_dummyTexture;
 }
 s_model;
+
+static const float s_rightHandedAxisMatrix[16] = {
+	0.0f, 0.0f, -1.0f, 0.0f,
+	1.0f, 0.0f, 0.0f, 0.0f,
+	0.0f, 1.0f, 0.0f, 0.0f,
+	0.0f, 0.0f, 0.0f, 1.0f
+};
+
+static bool readFileData(const char *filename, std::vector<uint8_t> *fileData)
+{
+#if _MSC_VER
+	FILE *f;
+	if (fopen_s(&f, filename, "rb") != 0)
+		f = nullptr;
+#else
+	FILE *f = fopen(filename, "rb");
+#endif
+	if (!f) {
+		fprintf(stderr, "Error opening '%s'\n", filename);
+		return false;
+	}
+	fseek(f, 0, SEEK_END);
+	const long length = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	fileData->resize(length);
+	if (fread(fileData->data(), 1, (size_t)length, f) < (size_t)length) {
+		fclose(f);
+		fprintf(stderr, "Error reading '%s'\n", filename);
+		return false;
+	}
+	fclose(f);
+	return true;
+}
 
 struct TextureData
 {
@@ -115,28 +131,9 @@ static TextureData textureLoad(const char *basePath, const char *filename)
 	TextureData td;
 	td.mem = nullptr;
 	td.sampleData = nullptr;
-#if _MSC_VER
-	FILE *f;
-	if (fopen_s(&f, fullFilename, "rb") != 0)
-		f = nullptr;
-#else
-	FILE *f = fopen(fullFilename, "rb");
-#endif
-	if (!f) {
-		fprintf(stderr, "Error opening '%s'\n", fullFilename);
-		return td;
-	}
-	fseek(f, 0, SEEK_END);
-	const long length = ftell(f);
-	fseek(f, 0, SEEK_SET);
 	std::vector<uint8_t> fileData;
-	fileData.resize(length);
-	if (fread(fileData.data(), 1, (size_t)length, f) < (size_t)length) {
-		fclose(f);
-		fprintf(stderr, "Error reading '%s'\n", fullFilename);
+	if (!readFileData(fullFilename, &fileData))
 		return td;
-	}
-	fclose(f);
 	int width, height, numComponents;
 	const uint8_t *imageData = stbi_load_from_memory(fileData.data(), (int)fileData.size(), &width, &height, &numComponents, 0);
 	if (!imageData) {
@@ -243,6 +240,7 @@ static void textureDestroyCache()
 
 void modelInit()
 {
+	s_model.status = ModelStatus::NotLoaded;
 	s_model.u_color = bgfx::createUniform("u_color", bgfx::UniformType::Vec4);
 	s_model.u_diffuse = bgfx::createUniform("u_diffuse", bgfx::UniformType::Vec4);
 	s_model.u_emission = bgfx::createUniform("u_emission", bgfx::UniformType::Vec4);
@@ -277,6 +275,145 @@ void modelShutdown()
 	bgfx::destroy(s_model.fs_material);
 	bgfx::destroy(s_model.materialProgram);
 	bgfx::destroy(s_model.u_dummyTexture);
+}
+
+static void fbxDestroy(objzModel *model)
+{
+	delete [] (uint32_t *)model->indices;
+	delete [] model->meshes;
+	delete [] model->objects;
+	delete [] (ModelVertex *)model->vertices;
+	if (model->materials)
+		delete [] model->materials;
+	delete model;
+}
+
+static objzModel *fbxLoad(const char *filename, const char * /*basePath*/) 
+{
+	std::vector<uint8_t> fileData;
+	if (!readFileData(filename, &fileData))
+		return nullptr;
+	ofbx::IScene *scene = ofbx::load(fileData.data(), (int)fileData.size(), ofbx::LoadFlags::TRIANGULATE);
+	if (!scene) {
+		fprintf(stderr, "%s\n", ofbx::getError());
+		return nullptr;
+	}
+	objzModel *model = new objzModel();
+	model->numIndices = 0;
+	model->numMaterials = 0;
+	model->numMeshes = (uint32_t)scene->getMeshCount();
+	model->numObjects = 1;
+	model->numVertices = 0;
+	// Count array lengths.
+	std::unordered_map<const ofbx::Material *, uint32_t> materialToIndex;
+	for (int i = 0; i < scene->getAllObjectCount(); i++) {
+		const ofbx::Object *object = scene->getAllObjects()[i];
+		if (object->getType() == ofbx::Object::Type::MATERIAL) {
+			materialToIndex[(const ofbx::Material *)object] = model->numMaterials;
+			model->numMaterials++;
+		}
+	}
+	for (int i = 0; i < scene->getMeshCount(); i++) {
+		const ofbx::Geometry *geo = scene->getMesh(i)->getGeometry();
+		model->numIndices += (uint32_t)geo->getIndexCount();
+		model->numVertices += (uint32_t)geo->getVertexCount();
+	}
+	// Alloc data.
+	auto indices = new uint32_t[model->numIndices];
+	auto vertices = new ModelVertex[model->numVertices];
+	model->indices = indices;
+	model->meshes = new objzMesh[model->numMeshes];
+	model->objects = new objzObject[model->numObjects];
+	model->vertices = vertices;
+	if (model->numMaterials > 0)
+		model->materials = new objzMaterial[model->numMaterials];
+	else
+		model->materials = nullptr;
+	// Populate data.
+	{
+		objzObject &object = model->objects[0];
+		object.name[0] = 0;
+		object.firstMesh = 0;
+		object.numMeshes = model->numMeshes;
+		object.firstIndex = 0;
+		object.numIndices = model->numIndices;
+		object.firstVertex = 0;
+		object.numVertices = model->numVertices;
+	}
+	uint32_t currentIndex = 0, currentVertex = 0;
+	for (int i = 0; i < scene->getMeshCount(); i++) {
+		const ofbx::Mesh *sourceMesh = scene->getMesh(i);
+		ofbx::Matrix dtransform = sourceMesh->getGlobalTransform();
+		float transform[16];
+		for (uint32_t j = 0; j < 16; j++)
+			transform[j] = (float)dtransform.m[j];
+		const ofbx::Geometry *sourceGeo = scene->getMesh(i)->getGeometry();
+		objzMesh &mesh = model->meshes[i];
+		mesh.firstIndex = currentIndex;
+		mesh.numIndices = (uint32_t)sourceGeo->getIndexCount();
+		// ignoring all but the first material for now
+		if (sourceMesh->getMaterialCount() > 0)
+			mesh.materialIndex = materialToIndex[sourceMesh->getMaterial(0)];
+		else
+			mesh.materialIndex = -1;
+		for (uint32_t j = 0; j < mesh.numIndices; j++) {
+			int sourceIndex = sourceGeo->getFaceIndices()[j];
+			if (sourceIndex < 0)
+				sourceIndex = -sourceIndex - 1; // index is negative if last in face
+			if (sourceIndex >= sourceGeo->getVertexCount()) {
+				fprintf(stderr, "Index '%d' out of range of vertex count '%d'\n", sourceIndex, sourceGeo->getVertexCount());
+				scene->destroy();
+				fbxDestroy(model);
+				return nullptr;
+			}
+			const uint32_t index = currentVertex + (uint32_t)sourceIndex;
+			assert(index < model->numVertices);
+			indices[mesh.firstIndex + j] = index;
+		}
+		for (uint32_t j = 0; j < (uint32_t)sourceGeo->getVertexCount(); j++) {
+			ModelVertex &vertex = vertices[currentVertex + j];
+			const ofbx::Vec3 &pos = sourceGeo->getVertices()[j];
+			vertex.pos.x = (float)pos.x;
+			vertex.pos.y = (float)pos.y;
+			vertex.pos.z = (float)pos.z;
+			vertex.pos = bx::mul(vertex.pos, transform);
+			if (sourceGeo->getNormals()) {
+				const ofbx::Vec3 &normal = sourceGeo->getNormals()[j];
+				vertex.normal.x = (float)normal.x;
+				vertex.normal.y = (float)normal.y;
+				vertex.normal.z = (float)normal.z;
+			} else {
+				vertex.normal = bx::Vec3(0.0f);
+			}
+			if (sourceGeo->getUVs(0)) {
+				const ofbx::Vec2 &uv = sourceGeo->getUVs(0)[j];
+				vertex.texcoord[0] = (float)uv.x;
+				vertex.texcoord[1] = (float)uv.y;
+			} else {
+				vertex.texcoord[0] = vertex.texcoord[1] = 0.0f;
+			}
+			vertex.texcoord[2] = vertex.texcoord[3] = 0.0f;
+		}
+		currentIndex += mesh.numIndices;
+		currentVertex += (uint32_t)sourceGeo->getVertexCount();
+	}
+	uint32_t currentMaterial = 0;
+	for (int i = 0; i < scene->getAllObjectCount(); i++) {
+		const ofbx::Object *object = scene->getAllObjects()[i];
+		if (object->getType() != ofbx::Object::Type::MATERIAL)
+			continue;
+		auto sourceMat = (const ofbx::Material *)object;
+		objzMaterial &destMat = model->materials[currentMaterial];
+		memset(&destMat, 0, sizeof(destMat));
+		destMat.opacity = 1.0f;
+		const ofbx::Color &diffuse = sourceMat->getDiffuseColor();
+		destMat.diffuse[0] = diffuse.r;
+		destMat.diffuse[1] = diffuse.g;
+		destMat.diffuse[2] = diffuse.b;
+		currentMaterial++;
+	}
+	scene->destroy();
+	return model;
 }
 
 BX_PRAGMA_DIAGNOSTIC_PUSH();
@@ -594,12 +731,22 @@ static void modelLoadThread(ModelLoadThreadArgs args)
 		}
 	}
 	const bx::StringView ext = bx::FilePath(args.filename).getExt();
-	if (bx::strCmpI(ext, ".glb") == 0 || bx::strCmpI(ext, ".gltf") == 0) {
+	if (bx::strCmpI(ext, ".fbx") == 0) {
+		objzModel *model = fbxLoad(args.filename, basePath);
+		if (!model) {
+			fprintf(stderr, "Error loading '%s'\n", args.filename);
+			setErrorMessage("Error loading '%s'\n", args.filename);
+			s_model.status = ModelStatus::NotLoaded;
+			return;
+		}
+		s_model.data = model;
+		s_model.destroyModelData = fbxDestroy;
+	} else if (bx::strCmpI(ext, ".glb") == 0 || bx::strCmpI(ext, ".gltf") == 0) {
 		objzModel *model = gltfLoad(args.filename, basePath);
 		if (!model) {
 			fprintf(stderr, "Error loading '%s'\n", args.filename);
 			setErrorMessage("Error loading '%s'\n", args.filename);
-			s_model.status.set(ModelStatus::NotLoaded);
+			s_model.status = ModelStatus::NotLoaded;
 			return;
 		}
 		s_model.data = model;
@@ -611,7 +758,7 @@ static void modelLoadThread(ModelLoadThreadArgs args)
 		if (!model) {
 			fprintf(stderr, "%s\n", objz_getError());
 			setErrorMessage("Error loading' %s'\n%s\n", args.filename, objz_getError());
-			s_model.status.set(ModelStatus::NotLoaded);
+			s_model.status = ModelStatus::NotLoaded;
 			return;
 		}
 		if (objz_getError()) // Print warnings.
@@ -627,7 +774,7 @@ static void modelLoadThread(ModelLoadThreadArgs args)
 		if (!model) {
 			fprintf(stderr, "Error loading '%s'\n", args.filename);
 			setErrorMessage("Error loading '%s'\n", args.filename);
-			s_model.status.set(ModelStatus::NotLoaded);
+			s_model.status = ModelStatus::NotLoaded;
 			return;
 		}
 		s_model.data = model;
@@ -667,12 +814,12 @@ static void modelLoadThread(ModelLoadThreadArgs args)
 		s_model.diffuseTextures[i] = mat.diffuseTexture[0] ? textureLoadCached(basePath, mat.diffuseTexture) : UINT32_MAX;
 		s_model.emissionTextures[i] = mat.emissionTexture[0] ? textureLoadCached(basePath, mat.emissionTexture) : UINT32_MAX;
 	}
-	s_model.status.set(ModelStatus::Finalizing);
+	s_model.status = ModelStatus::Finalizing;
 }
 
 void modelFinalize()
 {
-	if (s_model.status.get() != ModelStatus::Finalizing)
+	if (s_model.status != ModelStatus::Finalizing)
 		return;
 	if (s_model.thread) {
 		if (s_model.thread->joinable())
@@ -680,36 +827,47 @@ void modelFinalize()
 		delete s_model.thread;
 		s_model.thread = nullptr;
 	}
+	printf("   %u object%s\n", s_model.data->numObjects, s_model.data->numObjects > 1 ? "s" : "");
+	printf("   %u mesh%s\n", s_model.data->numMeshes, s_model.data->numMeshes > 1 ? "es" : "");
+	printf("   %u triangles\n", s_model.data->numIndices / 3);
+	printf("   %u vertices\n", s_model.data->numVertices);
 	textureCreateCachedTextures();
 	s_model.aabb = AABB();
 	s_model.centroid = bx::Vec3(0.0f, 0.0f, 0.0f);
+	uint32_t centroidCount = 0;
 	for (uint32_t i = 0; i < s_model.data->numVertices; i++) {
 		const bx::Vec3 &pos = ((const ModelVertex *)s_model.data->vertices)[i].pos;
 		s_model.aabb.addPoint(pos);
-		s_model.centroid = bx::add(s_model.centroid, pos);
+		if (!std::isnan(pos.x) && !std::isnan(pos.y) && !std::isnan(pos.z)) {
+			s_model.centroid = bx::add(s_model.centroid, pos);
+			centroidCount++;
+		}
 	}
-	s_model.centroid = bx::mul(s_model.centroid, 1.0f / s_model.data->numVertices);
-	s_model.vb = bgfx::createVertexBuffer(bgfx::makeRef(s_model.data->vertices, s_model.data->numVertices * sizeof(ModelVertex)), ModelVertex::decl);
+	s_model.centroid = bx::mul(s_model.centroid, 1.0f / centroidCount);
+	s_model.vb = bgfx::createVertexBuffer(bgfx::makeRef(s_model.data->vertices, s_model.data->numVertices * sizeof(ModelVertex)), ModelVertex::layout);
 	s_model.ib = bgfx::createIndexBuffer(bgfx::makeRef(s_model.data->indices, s_model.data->numIndices * sizeof(uint32_t)), BGFX_BUFFER_INDEX32);
-	s_model.wireframeVb = bgfx::createVertexBuffer(bgfx::makeRef(s_model.wireframeVertices.data(), uint32_t(s_model.wireframeVertices.size() * sizeof(WireframeVertex))), WireframeVertex::decl);
+	s_model.wireframeVb = bgfx::createVertexBuffer(bgfx::makeRef(s_model.wireframeVertices.data(), uint32_t(s_model.wireframeVertices.size() * sizeof(WireframeVertex))), WireframeVertex::layout);
 	resetCamera();
 	g_options.shadeMode = ShadeMode::Flat;
 	g_options.wireframeMode = WireframeMode::Triangles;
-	s_model.status.set(ModelStatus::Loaded);
+	s_model.status = ModelStatus::Loaded;
 }
 
-void modelOpenDialog()
+static bool modelCanOpen()
 {
-	if (s_model.status.get() == ModelStatus::Loading || s_model.status.get() == ModelStatus::Finalizing)
-		return;
+	if (s_model.status == ModelStatus::Loading || s_model.status == ModelStatus::Finalizing)
+		return false;
 	if (!(atlasIsNotGenerated() || atlasIsReady()))
-		return;
-	nfdchar_t *filename = nullptr;
-	nfdresult_t result = NFD_OpenDialog("glb,gltf,obj,stl", nullptr, &filename);
-	if (result != NFD_OKAY)
+		return false;
+	return true;
+}
+
+void modelOpen(const char *filename)
+{
+	if (!modelCanOpen())
 		return;
 	modelDestroy();
-	s_model.status.set(ModelStatus::Loading);
+	s_model.status = ModelStatus::Loading;
 	char windowTitle[256];
 	snprintf(windowTitle, sizeof(windowTitle), "%s - %s\n", WINDOW_TITLE, filename);
 	glfwSetWindowTitle(g_window, windowTitle);
@@ -717,6 +875,17 @@ void modelOpenDialog()
 	ModelLoadThreadArgs args;
 	bx::strCopy(args.filename, sizeof(args.filename), filename);
 	s_model.thread = new std::thread(modelLoadThread, args);
+}
+
+void modelOpenDialog()
+{
+	if (!modelCanOpen())
+		return;
+	nfdchar_t *filename = nullptr;
+	nfdresult_t result = NFD_OpenDialog("fbx,glb,gltf,obj,stl", nullptr, &filename);
+	if (result != NFD_OKAY)
+		return;
+	modelOpen(filename);
 	free(filename);
 }
 
@@ -743,15 +912,22 @@ void modelDestroy()
 		s_model.wireframeVb = BGFX_INVALID_HANDLE;
 	}
 	glfwSetWindowTitle(g_window, WINDOW_TITLE);
-	s_model.status.set(ModelStatus::NotLoaded);
+	s_model.status = ModelStatus::NotLoaded;
 }
 
 void modelRender(const float *view, const float *projection)
 {
-	if (s_model.status.get() != ModelStatus::Loaded)
+	if (s_model.status != ModelStatus::Loaded)
 		return;
+	float transform[16];
+	if (s_model.rightHandedAxis)
+		memcpy(transform, s_rightHandedAxisMatrix, sizeof(float) * 16);
+	else
+		bx::mtxIdentity(transform);
+	float scaleMatrix[16];
+	bx::mtxScale(scaleMatrix, s_model.scale);
 	float modelMatrix[16];
-	bx::mtxScale(modelMatrix, s_model.scale);
+	bx::mtxMul(modelMatrix, transform, scaleMatrix);
 	bgfx::setViewTransform(kModelView, view, projection);
 	bgfx::setViewTransform(kModelTransparentView, view, projection);
 	const bool renderCharts = g_options.shadeMode == ShadeMode::Charts && atlasIsReady();
@@ -773,6 +949,8 @@ void modelRender(const float *view, const float *projection)
 				bgfx::setVertexBuffer(0, s_model.vb);
 			}
 			uint64_t state = BGFX_STATE_DEFAULT;
+			if (!s_model.clockwiseFaceWinding)
+				state = (state & ~BGFX_STATE_CULL_CW) | BGFX_STATE_CULL_CCW;
 			if (transparent)
 				state |= BGFX_STATE_BLEND_ALPHA;
 			bgfx::setState(state);
@@ -818,8 +996,12 @@ void modelRender(const float *view, const float *projection)
 			bgfx::submit(transparent ? kModelTransparentView : kModelView, s_model.materialProgram);
 		}
 	}
-	if (renderCharts)
-		atlasRenderCharts(modelMatrix);
+	if (renderCharts) {
+		uint64_t state = BGFX_STATE_DEFAULT;
+		if (!s_model.clockwiseFaceWinding)
+			state = (state & ~BGFX_STATE_CULL_CW) | BGFX_STATE_CULL_CCW;
+		atlasRenderCharts(modelMatrix, state);
+	}
 	if (g_options.wireframe) {
 		if (g_options.wireframeMode == WireframeMode::Triangles) {
 			const float color[] = { 0.0f, 0.0f, 0.0f, 0.75f };
@@ -835,28 +1017,26 @@ void modelRender(const float *view, const float *projection)
 	}
 }
 
-void modelShowGuiOptions()
+void modelShowGuiMenu()
 {
-	ImGui::Text("%u objects", s_model.data->numObjects);
-	ImGui::Text("%u meshes", s_model.data->numMeshes);
-	ImGui::Text("%u vertices", s_model.data->numVertices);
-	ImGui::Text("%u triangles", s_model.data->numIndices / 3);
-	ImGui::InputFloat("Model scale", &s_model.scale, 0.01f, 0.1f);
+	ImGui::Checkbox("Right-handed axis", &s_model.rightHandedAxis);
+	ImGui::Checkbox("Clockwise face winding", &s_model.clockwiseFaceWinding);
+	ImGui::PushItemWidth(100.0f);
+	ImGui::InputFloat("Scale", &s_model.scale, 0.01f, 0.1f);
+	ImGui::PopItemWidth();
 	s_model.scale = bx::max(0.001f, s_model.scale);
 }
 
-void modelShowGuiWindow(int progressDots)
+void modelShowGuiWindow()
 {
-	ImGuiIO &io = ImGui::GetIO();
 	const ImGuiWindowFlags progressWindowFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
-	if (s_model.status.get() == ModelStatus::Loading) {
-		ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+	if (s_model.status == ModelStatus::Loading) {
+		ImGui::SetNextWindowPos(ImVec2(g_windowSize[0] * 0.5f, g_windowSize[1] * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 		if (ImGui::Begin("##modelProgress", nullptr, progressWindowFlags)) {
+			ImGui::AlignTextToFramePadding();
 			ImGui::Text("Loading model");
-			for (int i = 0; i < 3; i++) {
-				ImGui::SameLine();
-				ImGui::Text(i < progressDots ? "." : " ");
-			}
+			ImGui::SameLine();
+			ImGui::Spinner("##modelSpinner");
 			ImGui::End();
 		}
 	}
@@ -874,7 +1054,10 @@ const objzModel *modelGetData()
 
 bx::Vec3 modelGetCentroid()
 {
-	return bx::mul(s_model.centroid, s_model.scale);
+	bx::Vec3 centroid(s_model.centroid);
+	if (s_model.rightHandedAxis)
+		centroid = bx::mul(centroid, s_rightHandedAxisMatrix);
+	return bx::mul(centroid, s_model.scale);
 }
 
 float modelGetScale()
@@ -889,7 +1072,7 @@ bgfx::ShaderHandle modelGet_vs_model()
 
 bool modelIsLoaded()
 {
-	return s_model.status.get() == ModelStatus::Loaded;
+	return s_model.status == ModelStatus::Loaded;
 }
 
 static bool modelSampleTexture(uint32_t textureIndex, const float *uv, bx::Vec3 *color)

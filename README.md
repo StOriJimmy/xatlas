@@ -9,7 +9,7 @@ Mesh charting, parameterization and atlas packing. Suitable for generating uniqu
 [![](https://user-images.githubusercontent.com/3744372/43034067-5c09c1da-8d18-11e8-8490-25770f05e8e0.png)](https://user-images.githubusercontent.com/3744372/43034066-53a62dee-8d18-11e8-9767-0b38ed3fa2d3.png)
 
 ## Changes from thekla_atlas
-* Smaller code size - from about 18 KLOC to 9 KLOC
+* Smaller code size - from about 18 KLOC to 10 KLOC
 * Easier to integrate and build - a single source/header file pair instead of around 120 files and 10 directories.
 * Atlas resolution option for outputting multiple atlases.
 * Flexible data description API for input meshes.
@@ -54,19 +54,42 @@ See the [viewer](https://github.com/jpcy/xatlas/tree/master/extra) for example c
 
 ## TODO
 
-* Adding meshes: check for overlapping and intersecting geometry
-* Parameterization: use a better hole filling argorithm for non-planar holes
-* Packing: bilinear-aware rasterization
-* Viewer: bake lightmaps with simple path tracer
+* Segmentation: improve chart merging by using similar metrics to chart growing
+* Segmentation/Parameterization: detect geometry with zero Gaussian curvature (e.g. a cylinder) and unwrap as a single chart
+* Viewer: better lightmap baking
 * Viewer: chart picking in scene and texture views
 
-## Technical information
+## Technical information / related publications
 
 [Ignacio Castaño's blog post on thekla_atlas](http://the-witness.net/news/2010/03/graphics-tech-texture-parameterization/)
+
+P. Sander, J. Snyder, S. Gortler, and H. Hoppe. [Texture Mapping Progressive Meshes](http://hhoppe.com/proj/tmpm/)
+
+K. Hormann, B. Lévy, and A. Sheffer. [Mesh Parameterization: Theory and Practice](http://alice.loria.fr/publications/papers/2007/SigCourseParam/param-course.pdf)
+
+P. Sander, Z. Wood, S. Gortler, J. Snyder, and H. Hoppe. [Multi-Chart Geometry Images](http://hhoppe.com/proj/mcgim/)
+
+D. Julius, V. Kraevoy, and A. Sheffer. [D-Charts: Quasi-Developable Mesh Segmentation](https://www.cs.ubc.ca/~vlady/dcharts/EG05.pdf)
+
+B. Lévy, S. Petitjean, N. Ray, and J. Maillot. [Least Squares Conformal Maps for Automatic Texture Atlas Generation](https://members.loria.fr/Bruno.Levy/papers/LSCM_SIGGRAPH_2002.pdf)
+
+O. Sorkine, D. Cohen-Or, R. Goldenthal, and D. Lischinski. [Bounded-distortion Piecewise Mesh Parameterization](https://igl.ethz.ch/projects/parameterization/BDPMP/index.php)
+
+Y. O’Donnell. [Precomputed Global Illumination in Frostbite](https://media.contentapi.ea.com/content/dam/eacom/frostbite/files/gdc2018-precomputedgiobalilluminationinfrostbite.pdf)
+
+## Used by
+
+[Godot Engine](https://github.com/godotengine/godot)
+
+[Wicked Engine](https://github.com/turanszkij/WickedEngine)
+
+[Bakery - GPU Lightmapper](https://assetstore.unity.com/packages/tools/level-design/bakery-gpu-lightmapper-122218)
 
 ## Related projects
 
 [Microsoft's UVAtlas](https://github.com/Microsoft/UVAtlas) - isochart texture atlasing.
+
+[simpleuv](https://github.com/huxingyi/simpleuv/) - Automatic UV Unwrapping Library for Dust3D.
 
 [Ministry of Flat](http://www.quelsolaar.com/ministry_of_flat/) - Commercial automated UV unwrapper.
 

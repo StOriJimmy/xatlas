@@ -11,11 +11,15 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 */
 #include <GLFW/glfw3.h>
 #include <imgui/imgui.h>
+#include <fonts/fontawesome-webfont.h>
+#include <fonts/Roboto-Regular.h>
 #include "viewer.h"
 
 struct
 {
-	bgfx::VertexDecl vertexDecl;
+	GLFWcursor *cursors[ImGuiMouseCursor_COUNT];
+	GLFWcursor *currentCursor = nullptr;
+	bgfx::VertexLayout vertexFormat;
 	bgfx::TextureHandle font;
 	bgfx::ProgramHandle program;
 	bgfx::UniformHandle s_texture;
@@ -29,8 +33,10 @@ void guiInit()
 	ImGui::CreateContext();
 	int w, h;
 	glfwGetWindowSize(g_window, &w, &h);
-	ImGui::GetStyle().Colors[ImGuiCol_WindowBg].w = 0.9f;
 	ImGuiIO &io = ImGui::GetIO();
+	io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	io.ConfigWindowsResizeFromEdges = true;
 	io.DisplaySize.x = (float)w;
 	io.DisplaySize.y = (float)h;
 	io.IniFilename = nullptr;
@@ -53,6 +59,22 @@ void guiInit()
 	io.KeyMap[ImGuiKey_X] = GLFW_KEY_X;
 	io.KeyMap[ImGuiKey_Y] = GLFW_KEY_Y;
 	io.KeyMap[ImGuiKey_Z] = GLFW_KEY_Z;
+	// cursors
+	for (uint32_t i = 0; i < ImGuiMouseCursor_COUNT; i++)
+		s_gui.cursors[i] = nullptr;
+	s_gui.cursors[ImGuiMouseCursor_Arrow] = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+	s_gui.cursors[ImGuiMouseCursor_TextInput] = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
+	s_gui.cursors[ImGuiMouseCursor_ResizeNS] = glfwCreateStandardCursor(GLFW_VRESIZE_CURSOR);
+	s_gui.cursors[ImGuiMouseCursor_ResizeEW] = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
+	s_gui.cursors[ImGuiMouseCursor_Hand] = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
+	// merge in icons from Font Awesome
+	const float fontSize = 16.0f;
+	io.Fonts->AddFontFromMemoryCompressedTTF(s_robotoRegular_compressed_data, s_robotoRegular_compressed_size, fontSize);
+	static const ImWchar icons_ranges[] = { ICON_MIN_FA, ICON_MAX_FA, 0 };
+	ImFontConfig icons_config;
+	icons_config.MergeMode = true;
+	icons_config.PixelSnapH = true;
+	io.Fonts->AddFontFromMemoryCompressedTTF(s_fontAwesome_compressed_data, s_fontAwesome_compressed_size, fontSize, &icons_config, icons_ranges);
 	// font
 	int fontWidth, fontHeight;
 	uint8_t *fontData;
@@ -60,7 +82,7 @@ void guiInit()
 	s_gui.font = bgfx::createTexture2D((uint16_t)fontWidth, (uint16_t)fontHeight, false, 0, bgfx::TextureFormat::RGBA8, 0, bgfx::makeRef(fontData, fontWidth * fontHeight * 4));
 	io.Fonts->TexID = (ImTextureID)(intptr_t)s_gui.font.idx;
 	// ImDrawVert vertex decl
-	s_gui.vertexDecl
+	s_gui.vertexFormat
 		.begin()
 		.add(bgfx::Attrib::Position, 2, bgfx::AttribType::Float)
 		.add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
@@ -105,6 +127,11 @@ void guiRunFrame(float deltaTime)
 
 void guiRender()
 {
+	GLFWcursor *cursor = s_gui.cursors[ImGui::GetMouseCursor()];
+	if (cursor != s_gui.currentCursor) {
+		glfwSetCursor(g_window, cursor ? cursor : s_gui.cursors[ImGuiMouseCursor_Arrow]);
+		s_gui.currentCursor = cursor;
+	}
 	ImGui::Render();
 	ImDrawData *drawData = ImGui::GetDrawData();
 	if (drawData->CmdListsCount == 0)
@@ -117,9 +144,9 @@ void guiRender()
 		const ImDrawList* cmd_list = drawData->CmdLists[n];
 		bgfx::TransientVertexBuffer tvb;
 		bgfx::TransientIndexBuffer tib;
-		if (!bgfx::allocTransientBuffers(&tvb, s_gui.vertexDecl, cmd_list->VtxBuffer.Size, &tib, cmd_list->IdxBuffer.Size))
+		if (!bgfx::allocTransientBuffers(&tvb, s_gui.vertexFormat, cmd_list->VtxBuffer.Size, &tib, cmd_list->IdxBuffer.Size))
 			return;
-		assert(sizeof(ImDrawVert) == s_gui.vertexDecl.getStride());
+		assert(sizeof(ImDrawVert) == s_gui.vertexFormat.getStride());
 		memcpy(tvb.data, cmd_list->VtxBuffer.Data, tvb.size);
 		assert(sizeof(ImDrawIdx) == sizeof(uint16_t));
 		memcpy(tib.data, cmd_list->IdxBuffer.Data, tib.size);
@@ -144,4 +171,64 @@ void guiRender()
 			firstIndex += pcmd->ElemCount;
 		}
 	}
+}
+
+bool guiColumnCheckbox(const char *label, const char *id, bool *value)
+{
+	ImGui::AlignTextToFramePadding();
+	ImGui::Text("%s", label);
+	ImGui::NextColumn();
+	ImGui::PushItemWidth(-1);
+	bool result = ImGui::Checkbox(id, value);
+	ImGui::PopItemWidth();
+	ImGui::NextColumn();
+	return result;
+}
+
+bool guiColumnColorEdit(const char *label, const char *id, float *color)
+{
+	ImGui::AlignTextToFramePadding();
+	ImGui::Text("%s", label);
+	ImGui::NextColumn();
+	ImGui::PushItemWidth(-1);
+	bool result = ImGui::ColorEdit3(id, color, ImGuiColorEditFlags_NoInputs);
+	ImGui::PopItemWidth();
+	ImGui::NextColumn();
+	return result;
+}
+
+bool guiColumnInputFloat(const char *label, const char *id, float *value, float step, float stepFast, const char *format)
+{
+	ImGui::AlignTextToFramePadding();
+	ImGui::Text("%s", label);
+	ImGui::NextColumn();
+	ImGui::PushItemWidth(-1);
+	bool result = ImGui::InputFloat(id, value, step, stepFast, format);
+	ImGui::PopItemWidth();
+	ImGui::NextColumn();
+	return result;
+}
+
+bool guiColumnInputInt(const char *label, const char *id, int *value, int step)
+{
+	ImGui::AlignTextToFramePadding();
+	ImGui::Text("%s", label);
+	ImGui::NextColumn();
+	ImGui::PushItemWidth(-1);
+	bool result = ImGui::InputInt(id, value, step);
+	ImGui::PopItemWidth();
+	ImGui::NextColumn();
+	return result;
+}
+
+bool guiColumnSliderInt(const char *label, const char *id, int *value, int valueMin, int valueMax)
+{
+	ImGui::AlignTextToFramePadding();
+	ImGui::Text("%s", label);
+	ImGui::NextColumn();
+	ImGui::PushItemWidth(-1);
+	bool result = ImGui::SliderInt(id, value, valueMin, valueMax);
+	ImGui::PopItemWidth();
+	ImGui::NextColumn();
+	return result;
 }

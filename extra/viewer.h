@@ -15,6 +15,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <bx/math.h>
 #include <bgfx/bgfx.h>
 #include <objzero/objzero.h>
+#include <IconFontCppHeaders/IconsFontAwesome4.h>
+
+namespace ImGui {
+	bool Spinner(const char* label);
+}
 
 constexpr bgfx::ViewId kModelView = 0;
 constexpr bgfx::ViewId kModelTransparentView = 1;
@@ -54,13 +59,14 @@ void atlasShutdown();
 void atlasDestroy();
 void atlasGenerate();
 void atlasFinalize();
-void atlasRenderCharts(const float *modelMatrix);
+void atlasRenderCharts(const float *modelMatrix, uint64_t state);
 void atlasRenderChartsWireframe(const float *modelMatrix);
 void atlasShowGuiOptions();
-void atlasShowGuiWindow(int progressDots);
+void atlasShowGuiWindow();
 uint32_t atlasGetCount();
 uint32_t atlasGetWidth();
 uint32_t atlasGetHeight();
+const uint32_t *atlasGetImage();
 struct ModelVertex;
 std::vector<ModelVertex> *atlasGetVertices();
 std::vector<uint32_t> *atlasGetIndices();
@@ -79,6 +85,7 @@ void bakeShowGuiWindow();
 bgfx::TextureHandle bakeGetLightmap();
 uint32_t bakeGetLightmapSamplerFlags();
 bool bakeIsLightmapReady();
+bool bakeIsDenoised();
 
 struct GuiTextureFlags
 {
@@ -104,33 +111,39 @@ void guiShutdown();
 void guiResize(int width, int height);
 void guiRunFrame(float deltaTime);
 void guiRender();
+bool guiColumnCheckbox(const char *label, const char *id, bool *value);
+bool guiColumnColorEdit(const char *label, const char *id, float *color);
+bool guiColumnInputFloat(const char *label, const char *id, float *value, float step = 0.0f, float stepFast = 0.0f, const char *format = "%.3f");
+bool guiColumnInputInt(const char *label, const char *id, int *value, int step = 1);
+bool guiColumnSliderInt(const char *label, const char *id, int *value, int valueMin, int valueMax);
 
 struct ModelVertex
 {
 	bx::Vec3 pos;
 	bx::Vec3 normal;
 	float texcoord[4];
-	static bgfx::VertexDecl decl;
+	static bgfx::VertexLayout layout;
 
 	static void init()
 	{
-		decl.begin()
+		layout.begin()
 			.add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
 			.add(bgfx::Attrib::Normal, 3, bgfx::AttribType::Float)
 			.add(bgfx::Attrib::TexCoord0, 4, bgfx::AttribType::Float)
 			.end();
-		assert(decl.getStride() == sizeof(ModelVertex));
+		assert(layout.getStride() == sizeof(ModelVertex));
 	}
 };
 
 void modelInit();
 void modelShutdown();
 void modelFinalize();
+void modelOpen(const char *filename);
 void modelOpenDialog();
 void modelDestroy();
 void modelRender(const float *view, const float *projection);
-void modelShowGuiOptions();
-void modelShowGuiWindow(int progressDots);
+void modelShowGuiMenu();
+void modelShowGuiWindow();
 AABB modelGetAABB();
 const objzModel *modelGetData();
 bx::Vec3 modelGetCentroid();
@@ -169,6 +182,8 @@ struct Options
 	ChartColorMode chartColorMode = ChartColorMode::Individual;
 	int chartCellSize = 1;
 	bool lightmapPointSampling = false;
+	bool useDenoisedLightmap = true;
+	bool showAtlasOptionsWindow = true;
 	bool showAtlasWindow = true;
 	bool showLightmapWindow = true;
 };
@@ -176,21 +191,24 @@ struct Options
 extern Options g_options;
 struct GLFWwindow;
 extern GLFWwindow *g_window;
+extern int g_windowSize[2]; // Last known good window size. Not set to 0,0 when minimized.
 
 void randomRGB(uint8_t *color);
 uint32_t encodeRGBA(const uint8_t *rgba);
+void decodeRGBA(uint32_t rgbaIn, uint8_t *rgbaOut);
 void setErrorMessage(const char *format, ...);
 void resetCamera();
 
 enum class ShaderId
 {
+	fs_blit,
 	fs_chart,
 	fs_color,
 	fs_gui,
 	fs_material,
 	fs_wireframe,
+	vs_blit,
 	vs_chart,
-	vs_chartTexcoordSpace,
 	vs_color,
 	vs_gui,
 	vs_model,
@@ -206,15 +224,15 @@ struct WireframeVertex
 {
 	bx::Vec3 pos;
 	bx::Vec3 barycentric;
-	static bgfx::VertexDecl decl;
+	static bgfx::VertexLayout layout;
 
 	static void init()
 	{
-		decl.begin()
+		layout.begin()
 			.add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
 			.add(bgfx::Attrib::TexCoord0, 3, bgfx::AttribType::Float)
 			.end();
-		assert(decl.getStride() == sizeof(WireframeVertex));
+		assert(layout.getStride() == sizeof(WireframeVertex));
 	}
 };
 
