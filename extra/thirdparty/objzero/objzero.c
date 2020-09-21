@@ -24,7 +24,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 /*
-Ear clipping triangulation from tinyobjloader, also under MIT license.
+Ear clipping triangulation and tryParseDouble from tinyobjloader, also under MIT license.
 https://github.com/syoyo/tinyobjloader
 Copyright (c) 2012-2018 Syoyo Fujita and many contributors.
 */
@@ -58,6 +58,7 @@ Copyright (c) 2012-2018 Syoyo Fujita and many contributors.
 
 static char s_error[OBJZ_MAX_ERROR_LENGTH] = { 0 };
 static objzReallocFunc s_realloc = NULL;
+static objzProgressFunc s_progress = NULL;
 static uint32_t s_indexFormat = OBJZ_INDEX_FORMAT_AUTO;
 
 typedef struct {
@@ -115,6 +116,139 @@ static void strConcat(char *_dest, size_t _destSize, const char *_src, size_t _c
 {
 	const size_t start = strLength(_dest, _destSize);
 	strCopy(&_dest[start], _destSize - start, _src, _count);
+}
+
+// Tries to parse a floating point number located at s.
+//
+// s_end should be a location in the string where reading should absolutely
+// stop. For example at the end of the string, to prevent buffer overflows.
+//
+// Parses the following EBNF grammar:
+//   sign    = "+" | "-" ;
+//   END     = ? anything not in digit ?
+//   digit   = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+//   integer = [sign] , digit , {digit} ;
+//   decimal = integer , ["." , integer] ;
+//   float   = ( decimal , END ) | ( decimal , ("E" | "e") , integer , END ) ;
+//
+//  Valid strings are for example:
+//   -0  +3.1417e+2  -0.0E-3  1.0324  -1.41   11e2
+//
+// If the parsing is a success, result is set to the parsed value and true
+// is returned.
+//
+// The function is greedy and will parse until any of the following happens:
+//  - a non-conforming character is encountered.
+//  - s_end is reached.
+//
+// The following situations triggers a failure:
+//  - s >= s_end.
+//  - parse failure.
+//
+#define IS_DIGIT(x) ((unsigned int)((x) - '0') < (unsigned int)(10))
+
+static bool tryParseDouble(const char *s, const char *s_end, double *result)
+{
+	if (s >= s_end)
+		return false;
+	double mantissa = 0.0;
+	// This exponent is base 2 rather than 10.
+	// However the exponent we parse is supposed to be one of ten,
+	// thus we must take care to convert the exponent/and or the
+	// mantissa to a * 2^E, where a is the mantissa and E is the
+	// exponent.
+	// To get the final double we will use ldexp, it requires the
+	// exponent to be in base 2.
+	int exponent = 0;
+	// NOTE: THESE MUST BE DECLARED HERE SINCE WE ARE NOT ALLOWED
+	// TO JUMP OVER DEFINITIONS.
+	char sign = '+';
+	char exp_sign = '+';
+	char const *curr = s;
+	// How many characters were read in a loop.
+	int read = 0;
+	// Tells whether a loop terminated due to reaching s_end.
+	bool end_not_reached = false;
+	bool leading_decimal_dots = false;
+	// Find out what sign we've got.
+	if (*curr == '+' || *curr == '-') {
+		sign = *curr;
+		curr++;
+		if ((curr != s_end) && (*curr == '.')) {
+			// accept. Somethig like `.7e+2`, `-.5234`
+			leading_decimal_dots = true;
+		}
+	} else if (IS_DIGIT(*curr)) { /* Pass through. */
+	} else if (*curr == '.') {
+		// accept. Somethig like `.7e+2`, `-.5234`
+		leading_decimal_dots = true;
+	} else {
+		goto fail;
+	}
+	// Read the integer part.
+	end_not_reached = (curr != s_end);
+	if (!leading_decimal_dots) {
+		while (end_not_reached && IS_DIGIT(*curr)) {
+			mantissa *= 10;
+			mantissa += (int)(*curr - 0x30);
+			curr++;
+			read++;
+			end_not_reached = (curr != s_end);
+		}
+		// We must make sure we actually got something.
+		if (read == 0) goto fail;
+	}
+	// We allow numbers of form "#", "###" etc.
+	if (!end_not_reached) goto assemble;
+	// Read the decimal part.
+	if (*curr == '.') {
+		curr++;
+		read = 1;
+		end_not_reached = (curr != s_end);
+		while (end_not_reached && IS_DIGIT(*curr)) {
+			static const double pow_lut[] = { 1.0, 0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001, 0.0000001, };
+			const int lut_entries = sizeof pow_lut / sizeof pow_lut[0];
+			// NOTE: Don't use powf here, it will absolutely murder precision.
+			mantissa += (int)(*curr - 0x30) * (read < lut_entries ? pow_lut[read] : pow(10.0, -read));
+			read++;
+			curr++;
+			end_not_reached = (curr != s_end);
+		}
+	} else if (*curr == 'e' || *curr == 'E') {
+	} else {
+		goto assemble;
+	}
+	if (!end_not_reached) goto assemble;
+	// Read the exponent part.
+	if (*curr == 'e' || *curr == 'E') {
+		curr++;
+		// Figure out if a sign is present and if it is.
+		end_not_reached = (curr != s_end);
+		if (end_not_reached && (*curr == '+' || *curr == '-')) {
+			exp_sign = *curr;
+			curr++;
+		} else if (IS_DIGIT(*curr)) { /* Pass through. */
+		} else {
+			// Empty E is not allowed.
+			goto fail;
+		}
+		read = 0;
+		end_not_reached = (curr != s_end);
+		while (end_not_reached && IS_DIGIT(*curr)) {
+			exponent *= 10;
+			exponent += (int)(*curr - 0x30);
+			curr++;
+			read++;
+			end_not_reached = (curr != s_end);
+		}
+		exponent *= (exp_sign == '+' ? 1 : -1);
+		if (read == 0) goto fail;
+	}
+assemble:
+	*result = (sign == '+' ? 1 : -1) * (exponent ? ldexp(mantissa * pow(5.0, exponent), exponent) : mantissa);
+	return true;
+fail:
+	return false;
 }
 
 typedef struct {
@@ -295,11 +429,17 @@ static bool parseFloats(Lexer *_lexer, float *_result, uint32_t n) {
 	Token token;
 	for (uint32_t i = 0; i < n; i++) {
 		tokenize(_lexer, &token, false);
-		if (strLength(token.text, sizeof(token.text)) == 0) {
+		const size_t len = strLength(token.text, sizeof(token.text));
+		if (len == 0) {
+			appendError("(%u:%u) Empty float string", token.line, token.column);
+			return false;
+		}
+		double value;
+		if (!tryParseDouble(token.text, token.text + len, &value)) {
 			appendError("(%u:%u) Error parsing float", token.line, token.column);
 			return false;
 		}
-		_result[i] = (float)atof(token.text);
+		_result[i] = (float)value;
 	}
 	return true;
 }
@@ -336,11 +476,29 @@ bool fileOpen(File *_file, const char *_filename) {
 	}
 	_file->pos = 0;
 	_file->buffer = OBJZ_MALLOC(_file->length + 1);
-	const size_t bytesRead = fread(_file->buffer, 1, _file->length, handle);
-	fclose(handle);
-	if (bytesRead < _file->length) {
-		OBJZ_FREE(_file->buffer);
-		return false;
+	const size_t chunkSize = 8192;
+	size_t totalBytesRead = 0;
+	int progress = 0;
+	for (;;) {
+		const size_t bytesRemaining = _file->length - totalBytesRead;
+		const size_t bytesRequested = bytesRemaining > chunkSize ? chunkSize : bytesRemaining;
+		const size_t bytesRead = fread(&_file->buffer[totalBytesRead], 1, bytesRequested, handle);
+		totalBytesRead += bytesRead;
+		if (s_progress) {
+			const int newProgress = (int)(totalBytesRead / (float)_file->length * 50.0f);
+			if (newProgress > progress) {
+				progress = newProgress;
+				s_progress(_filename, progress);
+			}
+		}
+		if (totalBytesRead == _file->length) {
+			fclose(handle);
+			break;
+		} else if (bytesRead < bytesRequested) {
+			fclose(handle);
+			OBJZ_FREE(_file->buffer);
+			return false;
+		}
 	}
 	_file->buffer[_file->length] = 0;
 	return true;
@@ -444,6 +602,16 @@ static bool loadMaterialFile(const char *_objFilename, const char *_materialName
 		// Treat missing material file as a warning, not an error.
 		appendError("Failed to read material file '%s'", filename);
 		return true;
+	}
+	const uint32_t *bom32 = (const uint32_t *)file.buffer;
+	if (*bom32 == 0x0000feff || *bom32 == 0xfffe0000) {
+		appendError("UTF-32 encoding not supported in file '%s'", filename);
+		return false;
+	}
+	const uint16_t *bom16 = (const uint16_t *)file.buffer;
+	if (*bom16 == 0xfffe || *bom16 == 0xfeff) {
+		appendError("UTF-16 encoding not supported in file '%s'", filename);
+		return false;
 	}
 	Lexer lexer;
 	initLexer(&lexer);
@@ -855,6 +1023,10 @@ void objz_setRealloc(objzReallocFunc _realloc) {
 	s_realloc = _realloc;
 }
 
+void objz_setProgress(objzProgressFunc _progress) {
+	s_progress = _progress;
+}
+
 void objz_setIndexFormat(uint32_t _format) {
 	s_indexFormat = _format;
 }
@@ -868,10 +1040,24 @@ void objz_setVertexFormat(size_t _stride, size_t _positionOffset, size_t _texcoo
 
 objzModel *objz_load(const char *_filename) {
 	s_error[0] = 0;
+	if (s_progress)
+		s_progress(_filename, 0);
 	File file;
 	if (!fileOpen(&file, _filename)) {
 		appendError("Failed to read file '%s'", _filename);
 		return NULL;
+	}
+	if (s_progress)
+		s_progress(_filename, 50);
+	const uint32_t *bom32 = (const uint32_t *)file.buffer;
+	if (*bom32 == 0x0000feff || *bom32 == 0xfffe0000) {
+		appendError("UTF-32 encoding not supported in file '%s'", _filename);
+		return false;
+	}
+	const uint16_t *bom16 = (const uint16_t *)file.buffer;
+	if (*bom16 == 0xfffe || *bom16 == 0xfeff) {
+		appendError("UTF-16 encoding not supported in file '%s'", _filename);
+		return false;
 	}
 	// Parse the obj file and any material files.
 	// Faces are triangulated. Other than that, this is straight parsing.
@@ -896,8 +1082,16 @@ objzModel *objz_load(const char *_filename) {
 	Lexer lexer;
 	initLexer(&lexer);
 	Token token;
+	int progress = 50;
 	for (;;) {
 		char *line = fileReadLine(&file);
+		if (s_progress) {
+			const int newProgress = (int)(50.0f + (file.pos / (float)file.length) * 25.0f);
+			if (newProgress > progress) {
+				progress = newProgress;
+				s_progress(_filename, progress);
+			}
+		}
 		if (!line)
 			break;
 		lexerSetLine(&lexer, line);
@@ -1050,6 +1244,10 @@ objzModel *objz_load(const char *_filename) {
 	arrayDestroy(&faceIndices);
 	arrayDestroy(&tempFaceIndices);
 	fileClose(&file);
+	if (s_progress) {
+		progress = 75;
+		s_progress(_filename, progress);
+	}
 	// Do some post-processing of parsed data:
 	//   * generate normals
 	//   * find unique vertices from separately index vertex attributes (pos, texcoord, normal).
@@ -1090,6 +1288,13 @@ objzModel *objz_load(const char *_filename) {
 		normalHashMapInit(&normalHashMap, OBJZ_LARGEST(maxObjectFaces, 32), &normals); // Guess capacity.
 	}
 	for (uint32_t i = 0; i < tempObjects.length; i++) {
+		if (s_progress) {
+			const int newProgress = (int)(75.0f + (i / (float)tempObjects.length) * 25.0f);
+			if (newProgress > progress) {
+				progress = newProgress;
+				s_progress(_filename, progress);
+			}
+		}
 		const TempObject *tempObject = OBJZ_ARRAY_ELEMENT(tempObjects, i);
 		if (!tempObject->numFaces)
 			continue;
@@ -1202,6 +1407,8 @@ objzModel *objz_load(const char *_filename) {
 	chunkedArrayDestroy(&texcoords);
 	chunkedArrayDestroy(&normals);
 	vertexHashMapDestroy(&vertexHashMap);
+	if (s_progress)
+		s_progress(_filename, 100);
 	return model;
 error:
 	fileClose(&file);

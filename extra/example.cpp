@@ -1,14 +1,38 @@
 /*
-xatlas
-https://github.com/jpcy/xatlas
-Copyright (c) 2018 Jonathan Young
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Copyright (c) 2018-2020 Jonathan Young
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
+/*
+example
+
+This example shows how to use the xatlas API to generate a unique set of texture coordinates.
+
+Input: an .obj model file.
+
+Output:
+	* an .obj model file (example_output.obj). This is simplistic for example purposes, it doesn't copy materials from the input .obj file.
+	* texture coordinates rasterized to images, colored by chart (example_charts*.tga) and by triangle (example_tris*.tga).
+*/
+#include <mutex>
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -36,6 +60,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #define STRICMP strcasecmp
 #endif
 
+#define OBJ_TRIANGULATE 1 // Pass tinyobj::triangulation flag to tinyobjloader and treat all geometry as triangles.
+
 static bool s_verbose = false;
 
 class Stopwatch
@@ -58,10 +84,13 @@ static int Print(const char *format, ...)
 	return result;
 }
 
+// May be called from any thread.
 static void PrintProgress(const char *name, const char *indent1, const char *indent2, int progress, Stopwatch *stopwatch)
 {
 	if (s_verbose)
 		return;
+	static std::mutex progressMutex;
+	std::unique_lock<std::mutex> lock(progressMutex);
 	if (progress == 0)
 		stopwatch->reset();
 	printf("\r%s%s [", indent1, name);
@@ -73,7 +102,7 @@ static void PrintProgress(const char *name, const char *indent1, const char *ind
 		printf("\n%s%.2f seconds (%g ms) elapsed\n", indent2, stopwatch->elapsed() / 1000.0, stopwatch->elapsed());
 }
 
-static bool ProgressCallback(xatlas::ProgressCategory::Enum category, int progress, void *userData)
+static bool ProgressCallback(xatlas::ProgressCategory category, int progress, void *userData)
 {
 	Stopwatch *stopwatch = (Stopwatch *)userData;
 	PrintProgress(xatlas::StringForEnum(category), "   ", "      ", progress, stopwatch);
@@ -148,6 +177,56 @@ static void RasterizeTriangle(uint8_t *dest, int destWidth, const int *t0, const
 	}
 }
 
+#if !OBJ_TRIANGULATE
+//  public-domain code by Darel Rex Finley, 2007
+// http://alienryderflex.com/polygon_fill/
+static void RasterizePolygon(uint8_t *dest, int destWidth, int vertices[][2], const int vertexCount, const uint8_t *color)
+{
+	int IMAGE_TOP = INT_MAX, IMAGE_BOT = 0, IMAGE_LEFT = INT_MAX, IMAGE_RIGHT = 0;
+	for (int i = 0; i < vertexCount; i++) {
+		const int *vertex = vertices[i];
+		IMAGE_TOP = vertex[1] < IMAGE_TOP ? vertex[1] : IMAGE_TOP;
+		IMAGE_BOT = vertex[1] > IMAGE_BOT ? vertex[1] : IMAGE_BOT;
+		IMAGE_LEFT = vertex[0] < IMAGE_LEFT ? vertex[0] : IMAGE_LEFT;
+		IMAGE_RIGHT = vertex[0] > IMAGE_RIGHT ? vertex[0] : IMAGE_RIGHT;
+	}
+	int  nodes, nodeX[255], pixelX, pixelY, i, j, swap;
+	//  Loop through the rows of the image.
+	for (pixelY=IMAGE_TOP; pixelY<IMAGE_BOT; pixelY++) {
+		//  Build a list of nodes.
+		nodes=0; j=vertexCount-1;
+		for (i=0; i<vertexCount; i++) {
+			if (vertices[i][1]<(double) pixelY && vertices[j][1]>=(double) pixelY || vertices[j][1]<(double) pixelY && vertices[i][1]>=(double) pixelY) {
+				nodeX[nodes++]=(int) (vertices[i][0]+(pixelY-vertices[i][1])/(vertices[j][1]-vertices[i][1])*(vertices[j][0]-vertices[i][0]));
+			}
+			j=i;
+		}
+		//  Sort the nodes, via a simple “Bubble” sort.
+		i=0;
+		while (i<nodes-1) {
+			if (nodeX[i]>nodeX[i+1]) {
+				swap=nodeX[i]; nodeX[i]=nodeX[i+1]; nodeX[i+1]=swap; if (i) i--; }
+			else {
+				i++;
+			}
+		}
+		//  Fill the pixels between node pairs.
+		for (i=0; i<nodes; i+=2) {
+			if (nodeX[i  ]>=IMAGE_RIGHT)
+				break;
+			if (nodeX[i+1]> IMAGE_LEFT ) {
+				if (nodeX[i  ]< IMAGE_LEFT )
+					nodeX[i  ]=IMAGE_LEFT ;
+				if (nodeX[i+1]> IMAGE_RIGHT)
+					nodeX[i+1]=IMAGE_RIGHT;
+				for (pixelX=nodeX[i]; pixelX<nodeX[i+1]; pixelX++)
+					SetPixel(dest, destWidth, pixelX, pixelY, color);
+			}
+		}
+	}
+}
+#endif
+
 int main(int argc, char *argv[])
 {
 	if (argc < 2) {
@@ -162,7 +241,11 @@ int main(int argc, char *argv[])
 	std::vector<tinyobj::shape_t> shapes;
 	std::vector<tinyobj::material_t> materials;
 	std::string err;
-	if (!tinyobj::LoadObj(shapes, materials, err, argv[1], NULL, tinyobj::triangulation)) {
+	unsigned int flags = 0;
+#if OBJ_TRIANGULATE
+	flags = tinyobj::triangulation;
+#endif
+	if (!tinyobj::LoadObj(shapes, materials, err, argv[1], NULL, flags)) {
 		printf("Error: %s\n", err.c_str());
 		return EXIT_FAILURE;
 	}
@@ -196,18 +279,27 @@ int main(int argc, char *argv[])
 		meshDecl.indexCount = (uint32_t)objMesh.indices.size();
 		meshDecl.indexData = objMesh.indices.data();
 		meshDecl.indexFormat = xatlas::IndexFormat::UInt32;
-		xatlas::AddMeshError::Enum error = xatlas::AddMesh(atlas, meshDecl, (uint32_t)shapes.size());
+#if !OBJ_TRIANGULATE
+		if (objMesh.num_vertices.size() != objMesh.indices.size() / 3) {
+			meshDecl.faceVertexCount = objMesh.num_vertices.data();
+			meshDecl.faceCount = (uint32_t)objMesh.num_vertices.size();
+		}
+#endif
+		xatlas::AddMeshError error = xatlas::AddMesh(atlas, meshDecl, (uint32_t)shapes.size());
 		if (error != xatlas::AddMeshError::Success) {
 			xatlas::Destroy(atlas);
 			printf("\rError adding mesh %d '%s': %s\n", i, shapes[i].name.c_str(), xatlas::StringForEnum(error));
 			return EXIT_FAILURE;
 		}
 		totalVertices += meshDecl.vertexCount;
-		totalFaces += meshDecl.indexCount / 3;
+		if (meshDecl.faceCount > 0)
+			totalFaces += meshDecl.faceCount;
+		else
+			totalFaces += meshDecl.indexCount / 3; // Assume triangles if MeshDecl::faceCount not specified.
 	}
 	xatlas::AddMeshJoin(atlas); // Not necessary. Only called here so geometry totals are printed after the AddMesh progress indicator.
 	printf("   %u total vertices\n", totalVertices);
-	printf("   %u total triangles\n", totalFaces);
+	printf("   %u total faces\n", totalFaces);
 	// Generate atlas.
 	printf("Generating atlas\n");
 	xatlas::Generate(atlas);
@@ -216,14 +308,14 @@ int main(int argc, char *argv[])
 	for (uint32_t i = 0; i < atlas->atlasCount; i++)
 		printf("      %d: %0.2f%% utilization\n", i, atlas->utilization[i] * 100.0f);
 	printf("   %ux%u resolution\n", atlas->width, atlas->height);
-	totalVertices = totalFaces = 0;
+	totalVertices = 0;
 	for (uint32_t i = 0; i < atlas->meshCount; i++) {
 		const xatlas::Mesh &mesh = atlas->meshes[i];
 		totalVertices += mesh.vertexCount;
-		totalFaces += mesh.indexCount / 3;
+		// Input and output index counts always match.
+		assert(mesh.indexCount == (uint32_t)shapes[i].mesh.indices.size());
 	}
 	printf("   %u total vertices\n", totalVertices);
-	printf("   %u total triangles\n", totalFaces);
 	printf("%.2f seconds (%g ms) elapsed total\n", globalStopwatch.elapsed() / 1000.0, globalStopwatch.elapsed());
 	// Write meshes.
 	const char *modelFilename = "example_output.obj";
@@ -246,6 +338,18 @@ int main(int argc, char *argv[])
 			}
 			fprintf(file, "o %s\n", shapes[i].name.c_str());
 			fprintf(file, "s off\n");
+#if !OBJ_TRIANGULATE
+			auto faceCount = (const uint32_t)shapes[i].mesh.num_vertices.size();
+			uint32_t currentIndex = 0;
+			for (uint32_t f = 0; f < faceCount; f++) {
+				fprintf(file, "f ");
+				auto faceVertexCount = (const uint32_t)shapes[i].mesh.num_vertices[f];
+				for (uint32_t j = 0; j < faceVertexCount; j++) {
+					const uint32_t index = firstVertex + mesh.indexArray[currentIndex++] + 1; // 1-indexed
+					fprintf(file, "%d/%d/%d%c", index, index, index, j == (faceVertexCount - 1) ? '\n' : ' ');
+				}
+			}
+#else
 			for (uint32_t f = 0; f < mesh.indexCount; f += 3) {
 				fprintf(file, "f ");
 				for (uint32_t j = 0; j < 3; j++) {
@@ -253,6 +357,7 @@ int main(int argc, char *argv[])
 					fprintf(file, "%d/%d/%d%c", index, index, index, j == 2 ? '\n' : ' ');
 				}
 			}
+#endif
 			firstVertex += mesh.vertexCount;
 		}
 		fclose(file);
@@ -268,24 +373,42 @@ int main(int argc, char *argv[])
 			const xatlas::Mesh &mesh = atlas->meshes[i];
 			// Rasterize mesh triangles.
 			const uint8_t white[] = { 255, 255, 255 };
-			for (uint32_t j = 0; j < mesh.indexCount; j += 3) {
+#if OBJ_TRIANGULATE
+			const uint32_t faceCount = mesh.indexCount / 3;
+#else
+			auto faceCount = (const uint32_t)shapes[i].mesh.num_vertices.size();
+#endif
+			uint32_t faceFirstIndex = 0;
+			for (uint32_t f = 0; f < faceCount; f++) {
 				int32_t atlasIndex = -1;
-				int verts[3][2];
-				for (int k = 0; k < 3; k++) {
-					const xatlas::Vertex &v = mesh.vertexArray[mesh.indexArray[j + k]];
-					atlasIndex = v.atlasIndex; // The same for every vertex in the triangle.
-					verts[k][0] = int(v.uv[0]);
-					verts[k][1] = int(v.uv[1]);
+				int verts[255][2];
+#if OBJ_TRIANGULATE
+				const uint32_t faceVertexCount = 3;
+#else
+				const uint32_t faceVertexCount = shapes[i].mesh.num_vertices[f];
+#endif
+				for (uint32_t j = 0; j < faceVertexCount; j++) {
+					const xatlas::Vertex &v = mesh.vertexArray[mesh.indexArray[faceFirstIndex + j]];
+					atlasIndex = v.atlasIndex; // The same for every vertex in the face.
+					verts[j][0] = int(v.uv[0]);
+					verts[j][1] = int(v.uv[1]);
 				}
 				if (atlasIndex < 0)
-					continue; // Skip triangles that weren't atlased.
+					continue; // Skip faces that weren't atlased.
 				uint8_t color[3];
 				RandomColor(color);
 				uint8_t *imageData = &outputTrisImage[atlasIndex * imageDataSize];
+#if OBJ_TRIANGULATE
 				RasterizeTriangle(imageData, atlas->width, verts[0], verts[1], verts[2], color);
-				RasterizeLine(imageData, atlas->width, verts[0], verts[1], white);
-				RasterizeLine(imageData, atlas->width, verts[1], verts[2], white);
-				RasterizeLine(imageData, atlas->width, verts[2], verts[0], white);
+#else
+				if (faceVertexCount == 3)
+					RasterizeTriangle(imageData, atlas->width, verts[0], verts[1], verts[2], color);
+				else
+					RasterizePolygon(imageData, atlas->width, verts, (int)faceVertexCount, color);
+#endif
+				for (uint32_t j = 0; j < faceVertexCount; j++)
+					RasterizeLine(imageData, atlas->width, verts[j], verts[(j + 1) % faceVertexCount], white);
+				faceFirstIndex += faceVertexCount;
 			}
 			// Rasterize mesh charts.
 			for (uint32_t j = 0; j < mesh.chartCount; j++) {
@@ -293,17 +416,33 @@ int main(int argc, char *argv[])
 				uint8_t color[3];
 				RandomColor(color);
 				for (uint32_t k = 0; k < chart->faceCount; k++) {
-					int verts[3][2];
-					for (int l = 0; l < 3; l++) {
-						const xatlas::Vertex &v = mesh.vertexArray[mesh.indexArray[chart->faceArray[k] * 3 + l]];
+					const uint32_t face = chart->faceArray[k];
+#if OBJ_TRIANGULATE
+					const uint32_t faceVertexCount = 3;
+					faceFirstIndex = face * 3;
+#else
+					const uint32_t faceVertexCount = shapes[i].mesh.num_vertices[face];
+					faceFirstIndex = 0;
+					for (uint32_t l = 0; l < face; l++)
+						faceFirstIndex += shapes[i].mesh.num_vertices[l];
+#endif
+					int verts[255][2];
+					for (uint32_t l = 0; l < faceVertexCount; l++) {
+						const xatlas::Vertex &v = mesh.vertexArray[mesh.indexArray[faceFirstIndex + l]];
 						verts[l][0] = int(v.uv[0]);
 						verts[l][1] = int(v.uv[1]);
 					}
 					uint8_t *imageData = &outputChartsImage[chart->atlasIndex * imageDataSize];
+#if OBJ_TRIANGULATE
 					RasterizeTriangle(imageData, atlas->width, verts[0], verts[1], verts[2], color);
-					RasterizeLine(imageData, atlas->width, verts[0], verts[1], white);
-					RasterizeLine(imageData, atlas->width, verts[1], verts[2], white);
-					RasterizeLine(imageData, atlas->width, verts[2], verts[0], white);
+#else
+					if (faceVertexCount == 3)
+						RasterizeTriangle(imageData, atlas->width, verts[0], verts[1], verts[2], color);
+					else
+						RasterizePolygon(imageData, atlas->width, verts, (int)faceVertexCount, color);
+#endif
+					for (uint32_t l = 0; l < faceVertexCount; l++)
+						RasterizeLine(imageData, atlas->width, verts[l], verts[(l + 1) % faceVertexCount], white);
 				}
 			}
 		}

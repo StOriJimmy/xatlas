@@ -8,9 +8,9 @@ local ENKITS_DIR = path.join(THIRDPARTY_DIR, "enkiTS")
 local GLFW_DIR = path.join(THIRDPARTY_DIR, "glfw")
 local IGL_DIR = path.join(THIRDPARTY_DIR, "libigl")
 local MIMALLOC_DIR = path.join(THIRDPARTY_DIR, "mimalloc")
+local NATIVEFILEDIALOG_DIR = path.join(THIRDPARTY_DIR, "nativefiledialog")
 local OIDN_DIR = path.join(THIRDPARTY_DIR, "oidn")
 local OPENFBX_DIR = path.join(THIRDPARTY_DIR, "OpenFBX")
-local OPENNL_DIR = path.join(THIRDPARTY_DIR, "OpenNL")
 
 project "example"
 	kind "ConsoleApp"
@@ -19,6 +19,7 @@ project "example"
 	exceptionhandling "Off"
 	rtti "Off"
 	warnings "Extra"
+	sanitizer()
 	files "example.cpp"
 	includedirs(THIRDPARTY_DIR)
 	links { "stb_image_write", "tiny_obj_loader", "xatlas" }
@@ -34,6 +35,7 @@ project "example_uvmesh"
 	exceptionhandling "Off"
 	rtti "Off"
 	warnings "Extra"
+	sanitizer()
 	files "example_uvmesh.cpp"
 	includedirs(THIRDPARTY_DIR)
 	links { "stb_image_write", "tiny_obj_loader", "xatlas" }
@@ -49,6 +51,7 @@ project "test"
 	exceptionhandling "Off"
 	rtti "Off"
 	warnings "Extra"
+	sanitizer()
 	includedirs(THIRDPARTY_DIR)
 	files "test.cpp"
 	links { "tiny_obj_loader", "xatlas" }
@@ -64,6 +67,7 @@ project "viewer"
 	exceptionhandling "Off"
 	rtti "Off"
 	warnings "Extra"
+	sanitizer()
 	files { "viewer*", "shaders/*.*" }
 	includedirs
 	{
@@ -76,13 +80,13 @@ project "viewer"
 		path.join(GLFW_DIR, "include"),
 		path.join(IGL_DIR, "include"),
 		path.join(MIMALLOC_DIR, "include"),
+		path.join(NATIVEFILEDIALOG_DIR, "include"),
 		path.join(OIDN_DIR, "include"),
-		OPENFBX_DIR,
-		OPENNL_DIR
+		OPENFBX_DIR
 	}
-	links { "bgfx", "bimg", "bx", "cgltf", "enkiTS", "glfw", "imgui", "mimalloc", "nativefiledialog", "objzero", "OpenFBX", "OpenNL", "stb_image", "stb_image_resize", "xatlas" }
+	links { "bgfx", "bimg", "bx", "cgltf", "enkiTS", "glfw", "imgui", "mimalloc", "nativefiledialog", "objzero", "OpenFBX", "stb_image", "stb_image_resize", "xatlas" }
 	filter "system:windows"
-		links { "gdi32", "ole32", "psapi", "uuid" }
+		links { "bcrypt", "gdi32", "ole32", "psapi", "uuid"}
 	filter "system:linux"
 		links { "dl", "GL", "gtk-3", "gobject-2.0", "glib-2.0", "pthread", "X11", "Xcursor", "Xinerama", "Xrandr" }
 	filter "action:vs*"
@@ -99,6 +103,7 @@ project "bgfx"
 	cppdialect "C++14"
 	exceptionhandling "Off"
 	rtti "Off"
+	sanitizer()
 	defines	{ "__STDC_FORMAT_MACROS" }
 	files
 	{
@@ -141,6 +146,11 @@ project "bimg"
 	cppdialect "C++14"
 	exceptionhandling "Off"
 	rtti "Off"
+	sanitizer()
+	defines
+	{
+		"BIMG_DECODE_ENABLE=0"
+	}
 	files
 	{
 		path.join(BIMG_DIR, "include/bimg/*.h"),
@@ -164,6 +174,7 @@ project "bx"
 	cppdialect "C++14"
 	exceptionhandling "Off"
 	rtti "Off"
+	sanitizer()
 	defines	{ "__STDC_FORMAT_MACROS" }
 	files
 	{
@@ -191,6 +202,7 @@ project "bx"
 project "cgltf"
 	kind "StaticLib"
 	language "C"
+	sanitizer()
 	files(path.join(THIRDPARTY_DIR, "cgltf.*"))
 	filter "action:vs*"
 		defines { "_CRT_SECURE_NO_WARNINGS" }
@@ -201,11 +213,13 @@ project "enkiTS"
 	cppdialect "C++11"
 	exceptionhandling "Off"
 	rtti "Off"
+	sanitizer()
 	files(path.join(ENKITS_DIR, "*.*"))
 
 project "glfw"
 	kind "StaticLib"
 	language "C"
+	sanitizer()
 	files
 	{
 		path.join(GLFW_DIR, "include/*.h"),
@@ -250,11 +264,13 @@ project "imgui"
 	language "C++"
 	exceptionhandling "Off"
 	rtti "Off"
+	sanitizer()
 	files(path.join(THIRDPARTY_DIR, "imgui/*.*"))
 	
 project "mimalloc"
 	kind "StaticLib"
 	language "C"
+	sanitizer()
 	includedirs(path.join(MIMALLOC_DIR, "include"))
 	files(path.join(MIMALLOC_DIR, "src/*.*"))
 	excludes
@@ -269,11 +285,13 @@ project "nativefiledialog"
 	language "C++"
 	exceptionhandling "Off"
 	rtti "Off"
-	files(path.join(THIRDPARTY_DIR, "nativefiledialog/nfd_common.*"))
+	sanitizer()
+	includedirs(path.join(NATIVEFILEDIALOG_DIR, "include"))
+	files(path.join(NATIVEFILEDIALOG_DIR, "nfd_common.*"))
 	filter "system:windows"
-		files(path.join(THIRDPARTY_DIR, "nativefiledialog/nfd_win.cpp"))
+		files(path.join(NATIVEFILEDIALOG_DIR, "nfd_win.cpp"))
 	filter "system:linux"
-		files(path.join(THIRDPARTY_DIR, "nativefiledialog/nfd_gtk.c"))
+		files(path.join(NATIVEFILEDIALOG_DIR, "nfd_gtk.c"))
 		buildoptions(os.outputof("pkg-config --cflags gtk+-3.0"))
 	filter "action:vs*"
 		defines { "_CRT_SECURE_NO_WARNINGS" }
@@ -282,6 +300,7 @@ project "objzero"
 	kind "StaticLib"
 	language "C"
 	cdialect "C99"
+	sanitizer()
 	files(path.join(THIRDPARTY_DIR, "objzero/objzero.*"))
 	
 project "OpenFBX"
@@ -290,31 +309,25 @@ project "OpenFBX"
 	cppdialect "C++14"
 	exceptionhandling "Off"
 	rtti "Off"
+	sanitizer()
 	files(path.join(OPENFBX_DIR, "*.*"))
-	
-project "OpenNL"
-	kind "StaticLib"
-	language "C"
-	defines { "GEO_STATIC_LIBS" }
-	files(path.join(OPENNL_DIR, "*"))
-	filter "system:windows"
-		defines "WIN32"
-	filter "action:vs*"
-		defines { "_CRT_SECURE_NO_WARNINGS" }
 	
 project "stb_image"
 	kind "StaticLib"
 	language "C"
+	sanitizer()
 	files(path.join(THIRDPARTY_DIR, "stb_image.*"))
 	
 project "stb_image_resize"
 	kind "StaticLib"
 	language "C"
+	sanitizer()
 	files(path.join(THIRDPARTY_DIR, "stb_image_resize.*"))
 	
 project "stb_image_write"
 	kind "StaticLib"
 	language "C"
+	sanitizer()
 	files(path.join(THIRDPARTY_DIR, "stb_image_write.*"))
 	
 project "tiny_obj_loader"
@@ -322,4 +335,5 @@ project "tiny_obj_loader"
 	language "C++"
 	exceptionhandling "Off"
 	rtti "Off"
+	sanitizer()
 	files(path.join(THIRDPARTY_DIR, "tiny_obj_loader.*"))

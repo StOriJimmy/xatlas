@@ -1,13 +1,25 @@
 /*
-xatlas
-https://github.com/jpcy/xatlas
-Copyright (c) 2018 Jonathan Young
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Copyright (c) 2018-2020 Jonathan Young
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
 #pragma once
 #include <vector>
@@ -16,6 +28,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <bgfx/bgfx.h>
 #include <objzero/objzero.h>
 #include <IconFontCppHeaders/IconsFontAwesome4.h>
+#undef None
 
 namespace ImGui {
 	bool Spinner(const char* label);
@@ -59,7 +72,6 @@ void atlasShutdown();
 void atlasDestroy();
 void atlasGenerate();
 void atlasFinalize();
-void atlasRenderCharts(const float *modelMatrix, uint64_t state);
 void atlasRenderChartsWireframe(const float *modelMatrix);
 void atlasShowGuiOptions();
 void atlasShowGuiWindow();
@@ -72,6 +84,7 @@ std::vector<ModelVertex> *atlasGetVertices();
 std::vector<uint32_t> *atlasGetIndices();
 bgfx::VertexBufferHandle atlasGetVb();
 bgfx::IndexBufferHandle atlasGetIb();
+bgfx::TextureHandle atlasGetFaceDataTexture();
 bool atlasIsNotGenerated();
 bool atlasIsReady();
 
@@ -155,9 +168,8 @@ bool modelSampleMaterialEmission(const objzMaterial *mat, const float *uv, bx::V
 
 enum class ShadeMode
 {
-	Flat,
-	Charts,
-	Lightmap,
+	FlatMaterial,
+	LightmapMaterial,
 	LightmapOnly
 };
 
@@ -169,17 +181,33 @@ enum class WireframeMode
 
 enum class ChartColorMode
 {
-	Individual,
-	Invalid
+	// Sync with xatlas::ChartType
+	Planar,
+	Ortho,
+	LSCM,
+	Piecewise,
+	Invalid,
+	// Not in xatlas::ChartType
+	All
+};
+
+enum class OverlayMode
+{
+	None,
+	Chart,
+	Mesh,
+	Stretch
 };
 
 struct Options
 {
 	bool gui = true;
 	bool wireframe = true;
-	ShadeMode shadeMode = ShadeMode::Flat;
+	ShadeMode shadeMode = ShadeMode::FlatMaterial;
 	WireframeMode wireframeMode = WireframeMode::Triangles;
-	ChartColorMode chartColorMode = ChartColorMode::Individual;
+	ChartColorMode chartColorMode = ChartColorMode::All;
+	OverlayMode overlayMode = OverlayMode::None;
+	float overlayOpacity = 0.5f;
 	int chartCellSize = 1;
 	bool lightmapPointSampling = false;
 	bool useDenoisedLightmap = true;
@@ -202,13 +230,11 @@ void resetCamera();
 enum class ShaderId
 {
 	fs_blit,
-	fs_chart,
 	fs_color,
 	fs_gui,
 	fs_material,
 	fs_wireframe,
 	vs_blit,
-	vs_chart,
 	vs_color,
 	vs_gui,
 	vs_model,

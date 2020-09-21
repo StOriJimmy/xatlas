@@ -1,13 +1,25 @@
 /*
-xatlas
-https://github.com/jpcy/xatlas
-Copyright (c) 2018 Jonathan Young
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Copyright (c) 2018-2020 Jonathan Young
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
 #include <atomic>
 #include <cstddef>
@@ -686,7 +698,7 @@ static bool bakeTraceRays()
 #if 0
 		bakeTraceRaysTask(0, (int32_t)s_bake.sampleLocations.size(), 0, nullptr);
 #else
-		enkiAddTaskSetToPipe(s_bake.taskScheduler, task, 0, (int32_t)s_bake.sampleLocations.size());
+		enkiAddTaskSetArgs(s_bake.taskScheduler, task, nullptr, (int32_t)s_bake.sampleLocations.size());
 		enkiWaitForTaskSet(s_bake.taskScheduler, task);
 #endif
 		if (s_bake.cancelWorker)
@@ -700,7 +712,7 @@ static bool bakeTraceRays()
 			s_bake.updateStatus = UpdateStatus::Pending;
 		}
 	}
-	enkiDeleteTaskSet(task);
+	enkiDeleteTaskSet(s_bake.taskScheduler, task);
 	if (s_bake.cancelWorker)
 		return false;
 	const double elapsedSeconds = (clock() - start) / (double)CLOCKS_PER_SEC;
@@ -992,7 +1004,9 @@ void bakeExecute()
 		s_bake.denoisedLightmap = bgfx::createTexture2D((uint16_t)s_bake.lightmapWidth, (uint16_t)s_bake.lightmapHeight, false, 1, bgfx::TextureFormat::RGBA32F, BGFX_SAMPLER_UVW_CLAMP);
 	}
 	s_bake.initialized = true;
-	g_options.shadeMode = ShadeMode::Lightmap;
+	g_options.shadeMode = ShadeMode::LightmapMaterial;
+	g_options.overlayMode = OverlayMode::None;
+	g_options.wireframe = false;
 	s_bake.status = BakeStatus::InitEmbree;
 	s_bake.denoiseStatus = DenoiseStatus::Idle;
 	s_bake.updateStatus = UpdateStatus::Idle;
@@ -1008,9 +1022,9 @@ void bakeFrame(uint32_t frameNo)
 		// Do a final update of the lightmap texture with the dilated result.
 		bgfx::updateTexture2D(s_bake.lightmap, 0, 0, 0, 0, (uint16_t)s_bake.lightmapWidth, (uint16_t)s_bake.lightmapHeight, bgfx::makeRef(s_bake.lightmapData.data(), (uint32_t)s_bake.lightmapData.size() * sizeof(float)));
 		s_bake.status = BakeStatus::Finished;
-	} else if ((s_bake.status == BakeStatus::Cancelled || s_bake.status == BakeStatus::Error) && g_options.shadeMode == ShadeMode::Lightmap) {
-		// Executing bake sets shade mode to lightmap. Set it back to charts if bake was cancelled or there was an error.
-		g_options.shadeMode = ShadeMode::Charts;
+	} else if ((s_bake.status == BakeStatus::Cancelled || s_bake.status == BakeStatus::Error) && g_options.shadeMode == ShadeMode::LightmapMaterial) {
+		// Executing bake sets shade mode to lightmap. Set it back to flat if bake was cancelled or there was an error.
+		g_options.shadeMode = ShadeMode::FlatMaterial;
 	}
 	if (s_bake.denoiseStatus == DenoiseStatus::ThreadFinished) {
 #if BX_ARCH_64BIT
@@ -1033,7 +1047,7 @@ void bakeClear()
 {
 	s_bake.status = BakeStatus::Idle;
 	s_bake.denoiseStatus = DenoiseStatus::Idle;
-	g_options.shadeMode = atlasIsReady() ? ShadeMode::Charts : ShadeMode::Flat;
+	g_options.shadeMode = ShadeMode::FlatMaterial;
 	if (s_bake.embreeDevice) {
 		embree::ReleaseGeometry(s_bake.embreeGeometry);
 		embree::ReleaseScene(s_bake.embreeScene);

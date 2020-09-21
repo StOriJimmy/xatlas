@@ -1,13 +1,25 @@
 /*
-xatlas
-https://github.com/jpcy/xatlas
-Copyright (c) 2018 Jonathan Young
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Copyright (c) 2018-2020 Jonathan Young
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
 #include <mutex>
 #include <stdio.h>
@@ -281,6 +293,10 @@ static void glfw_keyCallback(GLFWwindow * /*window*/, int key, int, int action, 
 		s_showBgfxStats = !s_showBgfxStats;
 	if (key == GLFW_KEY_F2 && action == GLFW_RELEASE)
 		g_options.gui = !g_options.gui;
+	if (key == GLFW_KEY_F3 && action == GLFW_RELEASE)
+		s_camera.mode = CameraMode::FirstPerson;
+	if (key == GLFW_KEY_F4 && action == GLFW_RELEASE)
+		s_camera.mode = CameraMode::Orbit;
 	if (g_options.gui) {
 		ImGuiIO &io = ImGui::GetIO();
 		if (key >= 0 && key < 512)
@@ -342,13 +358,11 @@ struct ShaderSourceBundle
 static ShaderSourceBundle s_shaders[] = 
 {
 	SHADER_SOURCE_BUNDLE(fs_blit),
-	SHADER_SOURCE_BUNDLE(fs_chart),
 	SHADER_SOURCE_BUNDLE(fs_color),
 	SHADER_SOURCE_BUNDLE(fs_gui),
 	SHADER_SOURCE_BUNDLE(fs_material),
 	SHADER_SOURCE_BUNDLE(fs_wireframe),
 	SHADER_SOURCE_BUNDLE(vs_blit),
-	SHADER_SOURCE_BUNDLE(vs_chart),
 	SHADER_SOURCE_BUNDLE(vs_color),
 	SHADER_SOURCE_BUNDLE(vs_gui),
 	SHADER_SOURCE_BUNDLE(vs_model),
@@ -437,6 +451,7 @@ struct BgfxCallback : public bgfx::CallbackI
 	void fatal(const char* /*_filePath*/, uint16_t /*_line*/, bgfx::Fatal::Enum /*_code*/, const char* _str) override
 	{
 		fprintf(stderr, "%s\n", _str);
+		bx::debugBreak();
 		exit(EXIT_FAILURE);
 	}
 
@@ -486,7 +501,7 @@ int main(int argc, char **argv)
 	g_windowSize[1] = height;
 	init.resolution.width = (uint32_t)width;
 	init.resolution.height = (uint32_t)height;
-	init.resolution.reset = BGFX_RESET_VSYNC | BGFX_RESET_MSAA_X16;
+	init.resolution.reset = BGFX_RESET_VSYNC | BGFX_RESET_MSAA_X16 | BGFX_RESET_MAXANISOTROPY;
 	bgfx::init(init);
 	WireframeVertex::init();
 	commonShadersInit();
@@ -531,16 +546,26 @@ int main(int argc, char **argv)
 			bgfx::setViewRect(kModelTransparentView, 0, 0, bgfx::BackbufferRatio::Equal);
 		}
 		// Update camera.
-		if (s_camera.mode == CameraMode::FirstPerson && glfwGetInputMode(g_window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
-			const float speed = (s_keyDown[GLFW_KEY_LEFT_SHIFT] ? 20.0f : 5.0f) * deltaTime;
-			float deltaForward = 0.0f, deltaRight = 0.0f;
-			if (s_keyDown[GLFW_KEY_W]) deltaForward += speed;
-			if (s_keyDown[GLFW_KEY_S]) deltaForward -= speed;
-			if (s_keyDown[GLFW_KEY_A]) deltaRight -= speed;
-			if (s_keyDown[GLFW_KEY_D]) deltaRight += speed;
-			s_camera.firstPerson.move(deltaForward, deltaRight);
-			if (s_keyDown[GLFW_KEY_Q]) s_camera.firstPerson.position.y -= speed;
-			if (s_keyDown[GLFW_KEY_E]) s_camera.firstPerson.position.y += speed;
+		if (glfwGetInputMode(g_window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
+			if (s_camera.mode == CameraMode::FirstPerson) {
+				float speed = 5.0f;
+				if (s_keyDown[GLFW_KEY_LEFT_SHIFT] || s_keyDown[GLFW_KEY_RIGHT_SHIFT])
+					speed = 20.0f;
+				else if (s_keyDown[GLFW_KEY_LEFT_CONTROL] || s_keyDown[GLFW_KEY_RIGHT_CONTROL])
+					speed = 1.0f;
+				speed *= deltaTime;
+				float deltaForward = 0.0f, deltaRight = 0.0f;
+				if (s_keyDown[GLFW_KEY_W] || s_keyDown[GLFW_KEY_UP]) deltaForward += speed;
+				if (s_keyDown[GLFW_KEY_S] || s_keyDown[GLFW_KEY_DOWN]) deltaForward -= speed;
+				if (s_keyDown[GLFW_KEY_A] || s_keyDown[GLFW_KEY_LEFT]) deltaRight -= speed;
+				if (s_keyDown[GLFW_KEY_D] || s_keyDown[GLFW_KEY_RIGHT]) deltaRight += speed;
+				s_camera.firstPerson.move(deltaForward, deltaRight);
+				if (s_keyDown[GLFW_KEY_Q]) s_camera.firstPerson.position.y -= speed;
+				if (s_keyDown[GLFW_KEY_E]) s_camera.firstPerson.position.y += speed;
+			} else if (s_camera.mode == CameraMode::Orbit) {
+				if (s_keyDown[GLFW_KEY_EQUAL] || s_keyDown[GLFW_KEY_KP_ADD]) s_camera.orbit.zoom(-1.0f);
+				if (s_keyDown[GLFW_KEY_MINUS] || s_keyDown[GLFW_KEY_KP_SUBTRACT]) s_camera.orbit.zoom(1.0f);
+			}
 		}
 		float view[16];
 		if (s_camera.mode == CameraMode::FirstPerson)
@@ -610,7 +635,7 @@ int main(int argc, char **argv)
 					ImGui::TextDisabled("(?)");
 					if (ImGui::IsItemHovered()) {
 						ImGui::BeginTooltip();
-						ImGui::Text("Hold left mouse button on 3D view to enable camera\nW,A,S,D and Q,E to move\nHold SHIFT for faster movement");
+						ImGui::Text("F3 to enable.\nHold left mouse button on 3D view to enable camera\nW,A,S,D or Arrows and Q,E to move\nHold SHIFT for faster movement\nHold CONTROL for slower movement");
 						ImGui::EndTooltip();
 					}
 					ImGui::RadioButton("Orbit", (int *)&s_camera.mode, (int)CameraMode::Orbit);
@@ -618,7 +643,7 @@ int main(int argc, char **argv)
 					ImGui::TextDisabled("(?)");
 					if (ImGui::IsItemHovered()) {
 						ImGui::BeginTooltip();
-						ImGui::Text("Hold left mouse button on 3D view to enable camera");
+						ImGui::Text("F4 to enable.\nHold left mouse button on 3D view to enable camera\nScroll mouse or +/- keys to zoom");
 						ImGui::EndTooltip();
 					}
 					ImGui::Spacing();
@@ -638,27 +663,40 @@ int main(int argc, char **argv)
 							ImGui::EndMenu();
 						}
 					}
+					if (ImGui::BeginMenu("Shading")) {
+						ImGui::RadioButton("Flat material", (int *)&g_options.shadeMode, (int)ShadeMode::FlatMaterial);
+						if (bakeIsLightmapReady()) {
+							ImGui::RadioButton("Lightmapped material", (int *)&g_options.shadeMode, (int)ShadeMode::LightmapMaterial);
+							ImGui::RadioButton("Lightmap only", (int *)&g_options.shadeMode, (int)ShadeMode::LightmapOnly);
+						}
+						ImGui::EndMenu();
+					}
+					if (ImGui::BeginMenu("Overlay")) {
+						ImGui::RadioButton("None", (int *)&g_options.overlayMode, (int)OverlayMode::None);
+						if (atlasIsReady())
+							ImGui::RadioButton("Chart", (int *)&g_options.overlayMode, (int)OverlayMode::Chart);
+						ImGui::RadioButton("Mesh", (int *)&g_options.overlayMode, (int)OverlayMode::Mesh);
+						if (atlasIsReady())
+							ImGui::RadioButton("Stretch", (int *)&g_options.overlayMode, (int)OverlayMode::Stretch);
+						ImGui::PushItemWidth(100.0f);
+						ImGui::SliderFloat("Opacity", &g_options.overlayOpacity, 0.0f, 1.0f);
+						ImGui::PopItemWidth();
+						ImGui::EndMenu();
+					}
 					if (atlasIsReady()) {
-						if (ImGui::BeginMenu("Shading")) {
-							ImGui::RadioButton("Flat", (int *)&g_options.shadeMode, (int)ShadeMode::Flat);
-							ImGui::RadioButton("Charts##shading", (int *)&g_options.shadeMode, (int)ShadeMode::Charts);
-							if (bakeIsLightmapReady()) {
-								ImGui::RadioButton("Lightmap", (int *)&g_options.shadeMode, (int)ShadeMode::Lightmap);
-								ImGui::RadioButton("Lightmap only", (int *)&g_options.shadeMode, (int)ShadeMode::LightmapOnly);
-							}
+						if (ImGui::BeginMenu("Chart color")) {
+							ImGui::RadioButton("Planar", (int *)&g_options.chartColorMode, (int)ChartColorMode::Planar);
+							ImGui::RadioButton("Ortho", (int *)&g_options.chartColorMode, (int)ChartColorMode::Ortho);
+							ImGui::RadioButton("LSCM", (int *)&g_options.chartColorMode, (int)ChartColorMode::LSCM);
+							ImGui::RadioButton("Piecewise", (int *)&g_options.chartColorMode, (int)ChartColorMode::Piecewise);
+							ImGui::RadioButton("Invalid", (int *)&g_options.chartColorMode, (int)ChartColorMode::Invalid);
+							ImGui::RadioButton("All", (int *)&g_options.chartColorMode, (int)ChartColorMode::All);
 							ImGui::EndMenu();
 						}
-						if (g_options.shadeMode == ShadeMode::Charts) {
-							if (ImGui::BeginMenu("Chart color")) {
-								ImGui::RadioButton("Individual", (int *)&g_options.chartColorMode, (int)ChartColorMode::Individual);
-								ImGui::RadioButton("Invalid", (int *)&g_options.chartColorMode, (int)ChartColorMode::Invalid);
-								ImGui::EndMenu();
-							}
-							ImGui::PushItemWidth(100.0f);
-							ImGui::SliderInt("Chart cell size", &g_options.chartCellSize, 1, 32);
-							ImGui::PopItemWidth();
-						}
-						if (g_options.shadeMode == ShadeMode::Lightmap || g_options.shadeMode == ShadeMode::LightmapOnly) {
+						ImGui::PushItemWidth(100.0f);
+						ImGui::SliderInt("Chart cell size", &g_options.chartCellSize, 1, 32);
+						ImGui::PopItemWidth();
+						if (g_options.shadeMode == ShadeMode::LightmapMaterial || g_options.shadeMode == ShadeMode::LightmapOnly) {
 							ImGui::Checkbox("Lightmap point sampling", &g_options.lightmapPointSampling);
 							if (bakeIsDenoised())
 								ImGui::Checkbox("Use denoised lightmap", &g_options.useDenoisedLightmap);
@@ -666,22 +704,20 @@ int main(int argc, char **argv)
 					}
 					ImGui::EndMenu();
 				}
-				if (atlasIsReady() || bakeIsLightmapReady()) {
-					if (ImGui::BeginMenu(ICON_FA_WINDOWS " Window")) {
-						ImGui::MenuItem("Atlas Options", nullptr, &g_options.showAtlasOptionsWindow);
-						if (atlasIsReady())
-							ImGui::MenuItem("Atlas", nullptr, &g_options.showAtlasWindow);
-						if (bakeIsLightmapReady())
-							ImGui::MenuItem("Lightmap", nullptr, &g_options.showLightmapWindow);
-						ImGui::EndMenu();
-					}
+				if (ImGui::BeginMenu(ICON_FA_WINDOWS " Window")) {
+					ImGui::MenuItem("Atlas Options", nullptr, &g_options.showAtlasOptionsWindow);
+					if (atlasIsReady())
+						ImGui::MenuItem("Atlas", nullptr, &g_options.showAtlasWindow);
+					if (bakeIsLightmapReady())
+						ImGui::MenuItem("Lightmap", nullptr, &g_options.showLightmapWindow);
+					ImGui::EndMenu();
 				}
 				ImGui::EndMainMenuBar();
 			} else {
 				ImGui::PopStyleVar();
 			}
 			ImGui::End(); // DockSpaceWindow
-			if (ImGui::Begin(atlasOptionsWindowName, &g_options.showAtlasOptionsWindow)) {
+			if (g_options.showAtlasOptionsWindow && ImGui::Begin(atlasOptionsWindowName, &g_options.showAtlasOptionsWindow)) {
 				ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.5f);
 				if (modelIsLoaded()) {
 					atlasShowGuiOptions();

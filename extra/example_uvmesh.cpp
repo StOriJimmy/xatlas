@@ -1,14 +1,36 @@
 /*
-xatlas
-https://github.com/jpcy/xatlas
-Copyright (c) 2018 Jonathan Young
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Copyright (c) 2018-2020 Jonathan Young
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
+/*
+example_uvmesh
+
+This example uses the xatlas::AddUvMesh API to pack 10 copies of a model's existing texture coordinates into a single atlas.
+
+Input: a .obj model file. It must have texture coordinates.
+
+Output: the atlas texture coordinates rasterized to images, colored by chart (example_uvmesh_charts*.tga) and by triangle (example_uvmesh_tris*.tga).
+*/
+#include <mutex>
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -58,10 +80,13 @@ static int Print(const char *format, ...)
 	return result;
 }
 
+// May be called from any thread.
 static void PrintProgress(const char *name, const char *indent1, const char *indent2, int progress, Stopwatch *stopwatch)
 {
 	if (s_verbose)
 		return;
+	static std::mutex progressMutex;
+	std::unique_lock<std::mutex> lock(progressMutex);
 	if (progress == 0)
 		stopwatch->reset();
 	printf("\r%s%s [", indent1, name);
@@ -73,7 +98,7 @@ static void PrintProgress(const char *name, const char *indent1, const char *ind
 		printf("\n%s%.2f seconds (%g ms) elapsed\n", indent2, stopwatch->elapsed() / 1000.0, stopwatch->elapsed());
 }
 
-static bool ProgressCallback(xatlas::ProgressCategory::Enum category, int progress, void *userData)
+static bool ProgressCallback(xatlas::ProgressCategory category, int progress, void *userData)
 {
 	Stopwatch *stopwatch = (Stopwatch *)userData;
 	PrintProgress(xatlas::StringForEnum(category), "   ", "      ", progress, stopwatch);
@@ -185,21 +210,23 @@ int main(int argc, char *argv[])
 	Stopwatch globalStopwatch, stopwatch;
 	xatlas::SetProgressCallback(atlas, ProgressCallback, &stopwatch);
 	// Add meshes to atlas.
+	// Add 10 copies of the same model.
 	int progress = 0;
 	PrintProgress("Adding meshes", "", "   ", 0, &stopwatch);
 	uint32_t totalVertices = 0, totalFaces = 0;
 	const int n = 10;
-	for (int i = 0; i < 10; i++) {
+	for (int i = 0; i < n; i++) {
 		for (int s = 0; s < (int)shapes.size(); s++) {
 			tinyobj::mesh_t &objMesh = shapes[s].mesh;
 			xatlas::UvMeshDecl meshDecl;
+			meshDecl.faceMaterialData = (const uint32_t *)objMesh.material_ids.data();
 			meshDecl.vertexCount = (int)objMesh.texcoords.size() / 2;
 			meshDecl.vertexUvData = objMesh.texcoords.data();
 			meshDecl.vertexStride = sizeof(float) * 2;
 			meshDecl.indexCount = (int)objMesh.indices.size();
 			meshDecl.indexData = objMesh.indices.data();
 			meshDecl.indexFormat = xatlas::IndexFormat::UInt32;
-			xatlas::AddMeshError::Enum error = xatlas::AddUvMesh(atlas, meshDecl);
+			xatlas::AddMeshError error = xatlas::AddUvMesh(atlas, meshDecl);
 			if (error != xatlas::AddMeshError::Success) {
 				xatlas::Destroy(atlas);
 				printf("\rError adding mesh %d '%s': %s\n", s, shapes[i].name.c_str(), xatlas::StringForEnum(error));
@@ -219,6 +246,9 @@ int main(int argc, char *argv[])
 		PrintProgress("Adding meshes", "", "   ", 100, &stopwatch);
 	printf("   %u total vertices\n", totalVertices);
 	printf("   %u total triangles\n", totalFaces);
+	// Compute charts.
+	printf("Computing charts\n");
+	xatlas::ComputeCharts(atlas);
 	// Pack charts.
 	printf("Packing charts\n");
 	xatlas::PackCharts(atlas);

@@ -1,13 +1,25 @@
 /*
-xatlas
-https://github.com/jpcy/xatlas
-Copyright (c) 2018 Jonathan Young
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Copyright (c) 2018-2020 Jonathan Young
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
 #include <atomic>
 #include <cstddef>
@@ -19,7 +31,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <cgltf.h>
 #include <GLFW/glfw3.h>
 #include <imgui/imgui.h>
-#include <nativefiledialog/nfd.h>
+#include <nfd.h>
 #include <ofbx.h>
 #include <stb_image.h>
 #include <stb_image_resize.h>
@@ -51,6 +63,7 @@ struct
 {
 	std::atomic<ModelStatus> status;
 	std::thread *thread = nullptr;
+	std::atomic<int> loadProgress;
 	objzModel *data = nullptr;
 	void (*destroyModelData)(objzModel *) = nullptr;
 	std::vector<uint32_t> diffuseTextures;
@@ -70,10 +83,14 @@ struct
 	bgfx::UniformHandle u_diffuse;
 	bgfx::UniformHandle u_emission;
 	bgfx::UniformHandle u_lightDir;
-	bgfx::UniformHandle u_shade_diffuse_emission;
+	bgfx::UniformHandle u_shade_overlay_diffuse_emission;
+	bgfx::UniformHandle u_textureSize_cellSize;
+	bgfx::UniformHandle u_overlayOpacity_colorChartType;
+	bgfx::UniformHandle u_meshColor_primitiveIdStart;
 	bgfx::UniformHandle s_diffuse;
 	bgfx::UniformHandle s_emission;
 	bgfx::UniformHandle s_lightmap;
+	bgfx::UniformHandle s_faceData;
 	bgfx::UniformHandle u_color;
 	bgfx::TextureHandle u_dummyTexture;
 }
@@ -216,8 +233,13 @@ static void textureCreateCachedTextures()
 		bgfx::TextureFormat::Enum format = bgfx::TextureFormat::RGBA8;
 		if (texture.data.numComponents == 1)
 			format = bgfx::TextureFormat::R8;
+		else if (texture.data.numComponents == 2)
+			format = bgfx::TextureFormat::RG8;
 		else if (texture.data.numComponents == 3)
 			format = bgfx::TextureFormat::RGB8;
+		else {
+			assert(false);
+		}
 		texture.handle = bgfx::createTexture2D(texture.data.width, texture.data.height, true, 1, format, BGFX_SAMPLER_MIN_ANISOTROPIC | BGFX_SAMPLER_MAG_ANISOTROPIC, texture.data.mem);
 	}
 }
@@ -245,10 +267,14 @@ void modelInit()
 	s_model.u_diffuse = bgfx::createUniform("u_diffuse", bgfx::UniformType::Vec4);
 	s_model.u_emission = bgfx::createUniform("u_emission", bgfx::UniformType::Vec4);
 	s_model.u_lightDir = bgfx::createUniform("u_lightDir", bgfx::UniformType::Vec4);
-	s_model.u_shade_diffuse_emission = bgfx::createUniform("u_shade_diffuse_emission", bgfx::UniformType::Vec4);
+	s_model.u_shade_overlay_diffuse_emission = bgfx::createUniform("u_shade_overlay_diffuse_emission", bgfx::UniformType::Vec4);
+	s_model.u_textureSize_cellSize = bgfx::createUniform("u_textureSize_cellSize2", bgfx::UniformType::Vec4);
+	s_model.u_overlayOpacity_colorChartType = bgfx::createUniform("u_overlayOpacity_colorChartType", bgfx::UniformType::Vec4);
+	s_model.u_meshColor_primitiveIdStart = bgfx::createUniform("u_meshColor_primitiveIdStart", bgfx::UniformType::Vec4);
 	s_model.s_diffuse = bgfx::createUniform("s_diffuse", bgfx::UniformType::Sampler);
 	s_model.s_emission = bgfx::createUniform("s_emission", bgfx::UniformType::Sampler);
 	s_model.s_lightmap = bgfx::createUniform("s_lightmap", bgfx::UniformType::Sampler);
+	s_model.s_faceData = bgfx::createUniform("s_faceData", bgfx::UniformType::Sampler);
 	s_model.vs_model = loadShader(ShaderId::vs_model);
 	s_model.fs_material = loadShader(ShaderId::fs_material);
 	s_model.materialProgram = bgfx::createProgram(s_model.vs_model, s_model.fs_material);
@@ -267,10 +293,14 @@ void modelShutdown()
 	bgfx::destroy(s_model.u_diffuse);
 	bgfx::destroy(s_model.u_emission);
 	bgfx::destroy(s_model.u_lightDir);
-	bgfx::destroy(s_model.u_shade_diffuse_emission);
+	bgfx::destroy(s_model.u_shade_overlay_diffuse_emission);
+	bgfx::destroy(s_model.u_textureSize_cellSize);
+	bgfx::destroy(s_model.u_overlayOpacity_colorChartType);
+	bgfx::destroy(s_model.u_meshColor_primitiveIdStart);
 	bgfx::destroy(s_model.s_diffuse);
 	bgfx::destroy(s_model.s_emission);
 	bgfx::destroy(s_model.s_lightmap);
+	bgfx::destroy(s_model.s_faceData);
 	bgfx::destroy(s_model.vs_model);
 	bgfx::destroy(s_model.fs_material);
 	bgfx::destroy(s_model.materialProgram);
@@ -293,12 +323,13 @@ static objzModel *fbxLoad(const char *filename, const char * /*basePath*/)
 	std::vector<uint8_t> fileData;
 	if (!readFileData(filename, &fileData))
 		return nullptr;
-	ofbx::IScene *scene = ofbx::load(fileData.data(), (int)fileData.size(), ofbx::LoadFlags::TRIANGULATE);
+	ofbx::IScene *scene = ofbx::load(fileData.data(), (int)fileData.size(), (ofbx::u64)ofbx::LoadFlags::TRIANGULATE);
 	if (!scene) {
 		fprintf(stderr, "%s\n", ofbx::getError());
 		return nullptr;
 	}
 	objzModel *model = new objzModel();
+	model->flags = 0;
 	model->numIndices = 0;
 	model->numMaterials = 0;
 	model->numMeshes = (uint32_t)scene->getMeshCount();
@@ -341,6 +372,7 @@ static objzModel *fbxLoad(const char *filename, const char * /*basePath*/)
 		object.numVertices = model->numVertices;
 	}
 	uint32_t currentIndex = 0, currentVertex = 0;
+	bool hasTexcoords = true;
 	for (int i = 0; i < scene->getMeshCount(); i++) {
 		const ofbx::Mesh *sourceMesh = scene->getMesh(i);
 		ofbx::Matrix dtransform = sourceMesh->getGlobalTransform();
@@ -391,12 +423,15 @@ static objzModel *fbxLoad(const char *filename, const char * /*basePath*/)
 				vertex.texcoord[1] = (float)uv.y;
 			} else {
 				vertex.texcoord[0] = vertex.texcoord[1] = 0.0f;
+				hasTexcoords = false;
 			}
 			vertex.texcoord[2] = vertex.texcoord[3] = 0.0f;
 		}
 		currentIndex += mesh.numIndices;
 		currentVertex += (uint32_t)sourceGeo->getVertexCount();
 	}
+	if (hasTexcoords)
+		model->flags |= OBJZ_FLAG_TEXCOORDS;
 	uint32_t currentMaterial = 0;
 	for (int i = 0; i < scene->getAllObjectCount(); i++) {
 		const ofbx::Object *object = scene->getAllObjects()[i];
@@ -464,7 +499,15 @@ static const T *gltfGetBufferData(const cgltf_accessor *accessor)
 	return (const T *)&buffer[offset];
 }
 
-static void gltfPopulateMeshData(const cgltf_node *node, const cgltf_material *firstMaterial, objzModel *model, uint32_t &currentObject, uint32_t &currentMesh, uint32_t &firstMeshIndex, uint32_t &firstMeshVertex)
+#define GLTF_COPY_INDICES(type)                                                     \
+	const type *meshIndices = gltfGetBufferData<type>(aindices);                    \
+	for (uint32_t ii = 0; ii < (uint32_t)aindices->count; ii++) {                   \
+		assert(ii + firstMeshIndex < model->numIndices);                            \
+		indices[ii + firstMeshIndex] = firstMeshVertex + (uint32_t)meshIndices[ii]; \
+		assert(indices[ii + firstMeshIndex] < model->numVertices);                  \
+	}
+
+static void gltfPopulateMeshData(const cgltf_node *node, const cgltf_material *firstMaterial, objzModel *model, uint32_t &currentObject, uint32_t &currentMesh, uint32_t &firstMeshIndex, uint32_t &firstMeshVertex, bool &hasTexcoords)
 {
 	const cgltf_mesh *sourceMesh = node->mesh;
 	if (sourceMesh) {
@@ -509,22 +552,20 @@ static void gltfPopulateMeshData(const cgltf_node *node, const cgltf_material *f
 					vertex.texcoord[0] = meshTexcoord[0];
 					vertex.texcoord[1] = meshTexcoord[1];
 					meshTexcoord += atexcoords->stride / sizeof(float);
+				} else {
+					hasTexcoords = false;
 				}
 			}
 			// Copy indices.
 			auto indices = (uint32_t *)model->indices;
-			if (aindices->component_type == cgltf_component_type_r_16u) {
-				const uint16_t *meshIndices = gltfGetBufferData<uint16_t>(aindices);
-				for (uint32_t ii = 0; ii < (uint32_t)aindices->count; ii++) {
-					assert(ii + firstMeshIndex < model->numIndices);
-					indices[ii + firstMeshIndex] = firstMeshVertex + (uint32_t)meshIndices[ii];
-				}
-			} else  if (aindices->component_type == cgltf_component_type_r_32u) {
-				const uint32_t *meshIndices = gltfGetBufferData<uint32_t>(aindices);
-				for (uint32_t ii = 0; ii < (uint32_t)aindices->count; ii++) {
-					assert(ii + firstMeshIndex < model->numIndices);
-					indices[ii + firstMeshIndex] = firstMeshVertex + meshIndices[ii];
-				}
+			if (aindices->component_type == cgltf_component_type_r_8u) {
+				GLTF_COPY_INDICES(uint8_t)
+			} else if (aindices->component_type == cgltf_component_type_r_16u) {
+				GLTF_COPY_INDICES(uint16_t)
+			} else if (aindices->component_type == cgltf_component_type_r_32u) {
+				GLTF_COPY_INDICES(uint32_t)
+			} else {
+				assert (false);
 			}
 #if ONE_GLTF_OBJECT_PER_MESH
 			// Create object.
@@ -558,7 +599,7 @@ static void gltfPopulateMeshData(const cgltf_node *node, const cgltf_material *f
 		}
 	}
 	for (cgltf_size ci = 0; ci < node->children_count; ci++)
-		gltfPopulateMeshData(node->children[ci], firstMaterial, model, currentObject, currentMesh, firstMeshIndex, firstMeshVertex);
+		gltfPopulateMeshData(node->children[ci], firstMaterial, model, currentObject, currentMesh, firstMeshIndex, firstMeshVertex, hasTexcoords);
 }
 
 static objzModel *gltfLoad(const char *filename, const char *basePath) 
@@ -578,6 +619,7 @@ static objzModel *gltfLoad(const char *filename, const char *basePath)
 		return nullptr;
 	}
 	objzModel *model = new objzModel();
+	model->flags = 0;
 	model->numIndices = 0;
 	model->numMaterials = (uint32_t)gltfData->materials_count;
 	model->numMeshes = 0;
@@ -603,6 +645,7 @@ static objzModel *gltfLoad(const char *filename, const char *basePath)
 	model->vertices = new ModelVertex[model->numVertices];
 	// Populate data.
 	uint32_t currentObject = 0, currentMesh = 0, firstMeshIndex = 0, firstMeshVertex = 0;
+	bool hasTexcoords = true;
 	for (cgltf_size ni = 0; ni < gltfData->nodes_count; ni++) {
 		const cgltf_node &node = gltfData->nodes[ni];
 		if (node.parent)
@@ -622,11 +665,13 @@ static objzModel *gltfLoad(const char *filename, const char *basePath)
 		object.numVertices = 0;
 #endif
 		// Create mesh data.
-		gltfPopulateMeshData(&node, gltfData->materials, model, currentObject, currentMesh, firstMeshIndex, firstMeshVertex);
+		gltfPopulateMeshData(&node, gltfData->materials, model, currentObject, currentMesh, firstMeshIndex, firstMeshVertex, hasTexcoords);
 #if !ONE_GLTF_OBJECT_PER_MESH
 		currentObject++;
 #endif
 	}
+	if (hasTexcoords)
+		model->flags |= OBJZ_FLAG_TEXCOORDS;
 	// Materials.
 	model->materials = new objzMaterial[model->numMaterials];
 	for (uint32_t i = 0; i < model->numMaterials; i++) {
@@ -663,6 +708,7 @@ static objzModel *stlLoad(const char *filename, const char * /*basePath*/)
 	if (!stl_reader::ReadStlFile(filename, coords, normals, tris, solids))
 		return nullptr;
 	objzModel *model = new objzModel();
+	model->flags = 0;
 	model->numIndices = (uint32_t)tris.size();
 	model->numMaterials = 0;
 	model->numMeshes = (uint32_t)solids.size() - 1;
@@ -711,6 +757,11 @@ static void stlDestroy(objzModel *model)
 	delete model;
 }
 
+static void objzLoadProgress(const char *, int progress)
+{
+	s_model.loadProgress = progress;
+}
+
 struct ModelLoadThreadArgs
 {
 	char filename[256];
@@ -730,7 +781,8 @@ static void modelLoadThread(ModelLoadThreadArgs args)
 				break;
 		}
 	}
-	const bx::StringView ext = bx::FilePath(args.filename).getExt();
+    bx::FilePath filePath(args.filename);
+	const bx::StringView ext = filePath.getExt();
 	if (bx::strCmpI(ext, ".fbx") == 0) {
 		objzModel *model = fbxLoad(args.filename, basePath);
 		if (!model) {
@@ -752,6 +804,7 @@ static void modelLoadThread(ModelLoadThreadArgs args)
 		s_model.data = model;
 		s_model.destroyModelData = gltfDestroy;
 	} else if (bx::strCmpI(ext, ".obj") == 0) {
+		objz_setProgress(objzLoadProgress);
 		objz_setIndexFormat(OBJZ_INDEX_FORMAT_U32);
 		objz_setVertexFormat(sizeof(ModelVertex), offsetof(ModelVertex, pos), offsetof(ModelVertex, texcoord), offsetof(ModelVertex, normal));
 		objzModel *model = objz_load(args.filename);
@@ -844,11 +897,20 @@ void modelFinalize()
 		}
 	}
 	s_model.centroid = bx::mul(s_model.centroid, 1.0f / centroidCount);
+	float radius = 0.0f;
+	bx::Vec3 aabbCorners[8];
+	s_model.aabb.getCorners(aabbCorners);
+	for (uint32_t i = 0; i < 8; i++)
+		radius = bx::max(radius, bx::distance(s_model.centroid, aabbCorners[i]));
+	if (radius > 0.0f)
+		s_model.scale = 16.0f / radius;
 	s_model.vb = bgfx::createVertexBuffer(bgfx::makeRef(s_model.data->vertices, s_model.data->numVertices * sizeof(ModelVertex)), ModelVertex::layout);
 	s_model.ib = bgfx::createIndexBuffer(bgfx::makeRef(s_model.data->indices, s_model.data->numIndices * sizeof(uint32_t)), BGFX_BUFFER_INDEX32);
-	s_model.wireframeVb = bgfx::createVertexBuffer(bgfx::makeRef(s_model.wireframeVertices.data(), uint32_t(s_model.wireframeVertices.size() * sizeof(WireframeVertex))), WireframeVertex::layout);
+	if (!s_model.wireframeVertices.empty())
+		s_model.wireframeVb = bgfx::createVertexBuffer(bgfx::makeRef(s_model.wireframeVertices.data(), uint32_t(s_model.wireframeVertices.size() * sizeof(WireframeVertex))), WireframeVertex::layout);
 	resetCamera();
-	g_options.shadeMode = ShadeMode::Flat;
+	g_options.shadeMode = ShadeMode::FlatMaterial;
+	g_options.overlayMode = OverlayMode::None;
 	g_options.wireframeMode = WireframeMode::Triangles;
 	s_model.status = ModelStatus::Loaded;
 }
@@ -867,6 +929,7 @@ void modelOpen(const char *filename)
 	if (!modelCanOpen())
 		return;
 	modelDestroy();
+	s_model.loadProgress = 0;
 	s_model.status = ModelStatus::Loading;
 	char windowTitle[256];
 	snprintf(windowTitle, sizeof(windowTitle), "%s - %s\n", WINDOW_TITLE, filename);
@@ -884,7 +947,10 @@ void modelOpenDialog()
 	nfdchar_t *filename = nullptr;
 	nfdresult_t result = NFD_OpenDialog("fbx,glb,gltf,obj,stl", nullptr, &filename);
 	if (result != NFD_OKAY)
+    {
+	    free(filename);
 		return;
+    }
 	modelOpen(filename);
 	free(filename);
 }
@@ -906,10 +972,12 @@ void modelDestroy()
 	if (bgfx::isValid(s_model.vb)) {
 		bgfx::destroy(s_model.vb);
 		bgfx::destroy(s_model.ib);
-		bgfx::destroy(s_model.wireframeVb);
+		if (bgfx::isValid(s_model.wireframeVb)) {
+			bgfx::destroy(s_model.wireframeVb);
+			s_model.wireframeVb = BGFX_INVALID_HANDLE;
+		}
 		s_model.vb = BGFX_INVALID_HANDLE;
 		s_model.ib = BGFX_INVALID_HANDLE;
-		s_model.wireframeVb = BGFX_INVALID_HANDLE;
 	}
 	glfwSetWindowTitle(g_window, WINDOW_TITLE);
 	s_model.status = ModelStatus::NotLoaded;
@@ -930,87 +998,120 @@ void modelRender(const float *view, const float *projection)
 	bx::mtxMul(modelMatrix, transform, scaleMatrix);
 	bgfx::setViewTransform(kModelView, view, projection);
 	bgfx::setViewTransform(kModelTransparentView, view, projection);
-	const bool renderCharts = g_options.shadeMode == ShadeMode::Charts && atlasIsReady();
-	if (g_options.shadeMode != ShadeMode::Charts || renderCharts) {
-		const float lightDir[] = { view[2], view[6], view[10], 0.0f };
-		for (uint32_t i = 0; i < s_model.data->numMeshes; i++) {
-			const objzMesh &mesh = s_model.data->meshes[i];
-			const objzMaterial *mat = mesh.materialIndex == -1 ? nullptr : &s_model.data->materials[mesh.materialIndex];
-			// When rendering charts, emissive and transparent meshes won't be rendered, so do that here.
-			const bool emissive = mat ? mat->emission[0] > 0.0f || mat->emission[1] > 0.0f || mat->emission[2] > 0.0f : false;
-			const bool transparent = mat ? mat->opacity < 1.0f : false;
-			if (renderCharts && !emissive && !transparent)
-				continue;
-			if (atlasIsReady()) {
-				bgfx::setIndexBuffer(atlasGetIb(), mesh.firstIndex, mesh.numIndices);
-				bgfx::setVertexBuffer(0, atlasGetVb());
-			} else {
-				bgfx::setIndexBuffer(s_model.ib, mesh.firstIndex, mesh.numIndices);
-				bgfx::setVertexBuffer(0, s_model.vb);
-			}
-			uint64_t state = BGFX_STATE_DEFAULT;
-			if (!s_model.clockwiseFaceWinding)
-				state = (state & ~BGFX_STATE_CULL_CW) | BGFX_STATE_CULL_CCW;
-			if (transparent)
-				state |= BGFX_STATE_BLEND_ALPHA;
-			bgfx::setState(state);
-			bgfx::setTransform(modelMatrix);
-			bgfx::setUniform(s_model.u_lightDir, lightDir);
-			if (!mat) {
-				const float diffuse[] = { 0.5f, 0.5f, 0.5f, 1.0f };
-				const float emission[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-				bgfx::setUniform(s_model.u_diffuse, diffuse);
-				bgfx::setUniform(s_model.u_emission, emission);
-			} else {
-				const float diffuse[] = { mat->diffuse[0], mat->diffuse[1], mat->diffuse[2], mat->opacity };
-				const float emission[] = { mat->emission[0], mat->emission[1], mat->emission[2], mat->opacity };
-				bgfx::setUniform(s_model.u_diffuse, diffuse);
-				bgfx::setUniform(s_model.u_emission, emission);
-			}
-			float shade_diffuse_emission[4];
-			shade_diffuse_emission[1] = DIFFUSE_COLOR;
-			shade_diffuse_emission[2] = EMISSION_COLOR;
-			if (g_options.shadeMode == ShadeMode::Lightmap)
-				shade_diffuse_emission[0] = (float)SHADE_LIGHTMAP;
-			else if (g_options.shadeMode == ShadeMode::LightmapOnly)
-				shade_diffuse_emission[0] = (float)SHADE_LIGHTMAP_ONLY;
-			else
-				shade_diffuse_emission[0] = (float)SHADE_FLAT;
-			bgfx::TextureHandle diffuseTexture = BGFX_INVALID_HANDLE;
-			bgfx::TextureHandle emissionTexture = BGFX_INVALID_HANDLE;
-			if (mat) {
-				diffuseTexture = textureGetHandle(s_model.diffuseTextures[mesh.materialIndex]);
-				emissionTexture = textureGetHandle(s_model.emissionTextures[mesh.materialIndex]);
-			}
-			if (bgfx::isValid(diffuseTexture))
-				shade_diffuse_emission[1] = DIFFUSE_TEXTURE;
-			if (bgfx::isValid(emissionTexture))
-				shade_diffuse_emission[2] = EMISSION_TEXTURE;
-			bgfx::setUniform(s_model.u_shade_diffuse_emission, shade_diffuse_emission);
-			bgfx::setTexture(0, s_model.s_diffuse, bgfx::isValid(diffuseTexture) ? diffuseTexture : s_model.u_dummyTexture);
-			bgfx::setTexture(1, s_model.s_emission, bgfx::isValid(emissionTexture) ? emissionTexture : s_model.u_dummyTexture);
-			if (g_options.shadeMode == ShadeMode::Lightmap || g_options.shadeMode == ShadeMode::LightmapOnly)
-				bgfx::setTexture(2, s_model.s_lightmap, bakeGetLightmap(), bakeGetLightmapSamplerFlags());
-			else
-				bgfx::setTexture(2, s_model.s_lightmap, s_model.u_dummyTexture);
-			bgfx::submit(transparent ? kModelTransparentView : kModelView, s_model.materialProgram);
+	const float lightDir[] = { view[2], view[6], view[10], 0.0f };
+	uint32_t primitiveIdStart = 0;
+	for (uint32_t i = 0; i < s_model.data->numMeshes; i++) {
+		const objzMesh &mesh = s_model.data->meshes[i];
+		const objzMaterial *mat = mesh.materialIndex == -1 ? nullptr : &s_model.data->materials[mesh.materialIndex];
+		const bool transparent = mat ? mat->opacity < 1.0f : false;
+		if (atlasIsReady()) {
+			bgfx::setIndexBuffer(atlasGetIb(), mesh.firstIndex, mesh.numIndices);
+			bgfx::setVertexBuffer(0, atlasGetVb());
+		} else {
+			bgfx::setIndexBuffer(s_model.ib, mesh.firstIndex, mesh.numIndices);
+			bgfx::setVertexBuffer(0, s_model.vb);
 		}
-	}
-	if (renderCharts) {
 		uint64_t state = BGFX_STATE_DEFAULT;
 		if (!s_model.clockwiseFaceWinding)
 			state = (state & ~BGFX_STATE_CULL_CW) | BGFX_STATE_CULL_CCW;
-		atlasRenderCharts(modelMatrix, state);
+		if (transparent)
+			state |= BGFX_STATE_BLEND_ALPHA;
+		bgfx::setState(state);
+		bgfx::setTransform(modelMatrix);
+		bgfx::setUniform(s_model.u_lightDir, lightDir);
+		float diffuse[4], emission[4];
+		if (!mat) {
+			diffuse[0] = diffuse[1] = diffuse[2] = 0.5f;
+			diffuse[3] = 1.0f;
+			emission[0] = emission[1] = emission[2] = emission[3] = 0.0f;
+		} else {
+			diffuse[0] = mat->diffuse[0];
+			diffuse[1] = mat->diffuse[1];
+			diffuse[2] = mat->diffuse[2];
+			diffuse[3] = mat->opacity;
+			emission[0] = mat->emission[0];
+			emission[1] = mat->emission[1];
+			emission[2] = mat->emission[2];
+			emission[3] = mat->opacity;
+		}
+		bgfx::setUniform(s_model.u_diffuse, diffuse);
+		bgfx::setUniform(s_model.u_emission, emission);
+		float shade_overlay_diffuse_emission[4];
+		shade_overlay_diffuse_emission[2] = DIFFUSE_COLOR;
+		shade_overlay_diffuse_emission[3] = EMISSION_COLOR;
+		if (g_options.shadeMode == ShadeMode::LightmapMaterial)
+			shade_overlay_diffuse_emission[0] = (float)SHADE_LIGHTMAP;
+		else if (g_options.shadeMode == ShadeMode::LightmapOnly)
+			shade_overlay_diffuse_emission[0] = (float)SHADE_LIGHTMAP_ONLY;
+		else
+			shade_overlay_diffuse_emission[0] = (float)SHADE_FLAT;
+		shade_overlay_diffuse_emission[1] = (float)OVERLAY_NONE;
+		if (g_options.overlayMode == OverlayMode::Chart && atlasIsReady())
+			shade_overlay_diffuse_emission[1] = (float)OVERLAY_CHART;
+		else if (g_options.overlayMode == OverlayMode::Mesh)
+			shade_overlay_diffuse_emission[1] = (float)OVERLAY_MESH;
+		else if (g_options.overlayMode == OverlayMode::Stretch)
+			shade_overlay_diffuse_emission[1] = (float)OVERLAY_STRETCH;
+		bgfx::TextureHandle diffuseTexture = BGFX_INVALID_HANDLE;
+		bgfx::TextureHandle emissionTexture = BGFX_INVALID_HANDLE;
+		if (mat) {
+			diffuseTexture = textureGetHandle(s_model.diffuseTextures[mesh.materialIndex]);
+			emissionTexture = textureGetHandle(s_model.emissionTextures[mesh.materialIndex]);
+		}
+		if (bgfx::isValid(diffuseTexture))
+			shade_overlay_diffuse_emission[2] = DIFFUSE_TEXTURE;
+		if (bgfx::isValid(emissionTexture))
+			shade_overlay_diffuse_emission[3] = EMISSION_TEXTURE;
+		bgfx::setUniform(s_model.u_shade_overlay_diffuse_emission, shade_overlay_diffuse_emission);
+		float textureSize_cellSize[4];
+		if (atlasIsReady()) {
+			textureSize_cellSize[0] = (float)atlasGetWidth();
+			textureSize_cellSize[1] = (float)atlasGetHeight();
+		} else {
+			textureSize_cellSize[0] = textureSize_cellSize[1] = 0.0f;
+		}
+		textureSize_cellSize[2] = (float)g_options.chartCellSize;
+		textureSize_cellSize[3] = (float)g_options.chartCellSize;
+		bgfx::setUniform(s_model.u_textureSize_cellSize, textureSize_cellSize);
+		float overlayOpacity_colorChartType[4];
+		overlayOpacity_colorChartType[0] = g_options.overlayOpacity;
+		overlayOpacity_colorChartType[1] = (float)g_options.chartColorMode;
+		bgfx::setUniform(s_model.u_overlayOpacity_colorChartType, overlayOpacity_colorChartType);
+		float meshColor_primitiveIdStart[4];
+		if (g_options.overlayMode == OverlayMode::Mesh) {
+			srand(i);
+			uint8_t color[4];
+			randomRGB(color);
+			meshColor_primitiveIdStart[0] = color[0] / 255.0f;
+			meshColor_primitiveIdStart[1] = color[1] / 255.0f;
+			meshColor_primitiveIdStart[2] = color[2] / 255.0f;
+		}
+		meshColor_primitiveIdStart[3] = (float)primitiveIdStart;
+		bgfx::setUniform(s_model.u_meshColor_primitiveIdStart, meshColor_primitiveIdStart);
+		bgfx::setTexture(0, s_model.s_diffuse, bgfx::isValid(diffuseTexture) ? diffuseTexture : s_model.u_dummyTexture);
+		bgfx::setTexture(1, s_model.s_emission, bgfx::isValid(emissionTexture) ? emissionTexture : s_model.u_dummyTexture);
+		if (g_options.shadeMode == ShadeMode::LightmapMaterial || g_options.shadeMode == ShadeMode::LightmapOnly)
+			bgfx::setTexture(2, s_model.s_lightmap, bakeGetLightmap(), bakeGetLightmapSamplerFlags());
+		else
+			bgfx::setTexture(2, s_model.s_lightmap, s_model.u_dummyTexture);
+		if (g_options.overlayMode == OverlayMode::Chart || g_options.overlayMode == OverlayMode::Stretch)
+			bgfx::setTexture(3, s_model.s_faceData, atlasGetFaceDataTexture());
+		else
+			bgfx::setTexture(3, s_model.s_faceData, s_model.u_dummyTexture);
+		bgfx::submit(transparent ? kModelTransparentView : kModelView, s_model.materialProgram);
+		primitiveIdStart += mesh.numIndices / 3;
 	}
 	if (g_options.wireframe) {
 		if (g_options.wireframeMode == WireframeMode::Triangles) {
-			const float color[] = { 0.0f, 0.0f, 0.0f, 0.75f };
-			bgfx::setUniform(s_model.u_color, color);
-			setWireframeThicknessUniform(1.5f);
-			bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL | BGFX_STATE_CULL_CW | BGFX_STATE_BLEND_ALPHA | BGFX_STATE_MSAA);
-			bgfx::setTransform(modelMatrix);
-			bgfx::setVertexBuffer(0, s_model.wireframeVb);
-			bgfx::submit(kModelView, getWireframeProgram(), 1);
+			if (bgfx::isValid(s_model.wireframeVb)) {
+				const float color[] = { 0.0f, 0.0f, 0.0f, 0.75f };
+				bgfx::setUniform(s_model.u_color, color);
+				setWireframeThicknessUniform(1.5f);
+				bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL | BGFX_STATE_CULL_CW | BGFX_STATE_BLEND_ALPHA | BGFX_STATE_MSAA);
+				bgfx::setTransform(modelMatrix);
+				bgfx::setVertexBuffer(0, s_model.wireframeVb);
+				bgfx::submit(kModelView, getWireframeProgram(), 1);
+			}
 		} else {
 			atlasRenderChartsWireframe(modelMatrix);
 		}
@@ -1037,6 +1138,8 @@ void modelShowGuiWindow()
 			ImGui::Text("Loading model");
 			ImGui::SameLine();
 			ImGui::Spinner("##modelSpinner");
+			if (s_model.loadProgress > 0)
+				ImGui::ProgressBar(s_model.loadProgress.load() / 100.0f);
 			ImGui::End();
 		}
 	}
